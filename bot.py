@@ -7,6 +7,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -14,6 +16,7 @@ ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 
 balances = {}
 bets = {}
+pending_bets = {}
 
 
 def get_sports():
@@ -64,7 +67,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 ¡Bienvenido!\n\n"
         "🏆 Sports Bot\n\n"
-        "💵 Saldo virtual: 1,000 créditos\n\n"
+        f"💵 Saldo virtual: {balances[user_id]:,} créditos\n\n"
         "Selecciona una opción:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -98,8 +101,7 @@ async def show_sports(query):
         else:
             text = (
                 "⚽ FÚTBOL\n\n"
-                "Selecciona una competición:\n\n"
-                f"Encontradas: {len(football)}"
+                "Selecciona una competición:"
             )
 
         await query.edit_message_text(
@@ -147,7 +149,7 @@ async def show_games(query, sport_key):
         ])
 
         await query.edit_message_text(
-            f"⚽ PARTIDOS\n\n"
+            "⚽ PARTIDOS\n\n"
             f"Competición: {sport_key}\n\n"
             "Selecciona un partido:",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -157,9 +159,7 @@ async def show_games(query, sport_key):
         print("ERROR ODDS:", e)
 
         await query.edit_message_text(
-            "⚠️ No pude obtener los partidos.\n\n"
-            "Puede que esta competición no tenga cuotas disponibles "
-            "en este momento."
+            "⚠️ No pude obtener los partidos."
         )
 
 
@@ -181,29 +181,48 @@ async def show_game(query, sport_key, event_id):
         home = game["home_team"]
         away = game["away_team"]
 
-        outcomes = []
+        unique = {}
 
         for bookmaker in game.get("bookmakers", []):
             for market in bookmaker.get("markets", []):
                 if market["key"] == "h2h":
-                    outcomes.extend(market.get("outcomes", []))
+                    for outcome in market.get("outcomes", []):
+                        name = outcome["name"]
+                        price = outcome["price"]
 
-        # Evitamos repetir selecciones cuando hay varios bookmakers
-        unique = {}
-
-        for outcome in outcomes:
-            name = outcome["name"]
-
-            if name not in unique:
-                unique[name] = outcome["price"]
+                        if name not in unique:
+                            unique[name] = price
 
         keyboard = []
 
         for name, price in unique.items():
+
+            callback = (
+                f"pick:{sport_key}:{event_id}:"
+                f"{name}"
+            )
+
+            # Telegram limita callback_data a 64 bytes.
+            # Guardamos la información temporalmente en memoria
+            # usando un identificador corto.
+
+            user_id = query.from_user.id
+
+            pick_id = f"{user_id}_{event_id}_{len(pending_bets)}"
+
+            pending_bets[pick_id] = {
+                "sport_key": sport_key,
+                "event_id": event_id,
+                "home": home,
+                "away": away,
+                "selection": name,
+                "odds": price,
+            }
+
             keyboard.append([
                 InlineKeyboardButton(
                     f"{name} — {price:.2f}",
-                    callback_data="selection"
+                    callback_data=f"pick:{pick_id}"
                 )
             ])
 
@@ -218,13 +237,13 @@ async def show_game(query, sport_key, event_id):
             f"⚽ {home}\n"
             f"vs\n"
             f"⚽ {away}\n\n"
-            "📊 Cuotas disponibles:\n\n"
+            "📊 CUOTAS\n\n"
         )
 
         for name, price in unique.items():
             text += f"• {name}: {price:.2f}\n"
 
-        text += "\n💡 Selecciona una opción para continuar."
+        text += "\n🎯 Selecciona tu apuesta:"
 
         await query.edit_message_text(
             text,
@@ -235,8 +254,220 @@ async def show_game(query, sport_key, event_id):
         print("ERROR GAME:", e)
 
         await query.edit_message_text(
-            "⚠️ No pude obtener las cuotas de este partido."
+            "⚠️ No pude obtener las cuotas."
         )
+
+
+async def ask_amount(query, pick_id):
+    user_id = query.from_user.id
+
+    pick = pending_bets.get(pick_id)
+
+    if not pick:
+        await query.edit_message_text(
+            "⚠️ Esta selección ya no está disponible."
+        )
+        return
+
+    balance = balances.get(user_id, 1000)
+
+    pending_bets[f"active:{user_id}"] = pick
+
+    await query.edit_message_text(
+        f"🎯 SELECCIÓN\n\n"
+        f"⚽ {pick['home']} vs {pick['away']}\n\n"
+        f"Tu selección: {pick['selection']}\n"
+        f"📈 Cuota: {pick['odds']:.2f}\n\n"
+        f"💰 Saldo disponible: {balance:,} créditos\n\n"
+        "💵 Escribe ahora el monto que deseas apostar.\n\n"
+        "Ejemplo: 200"
+    )
+
+
+async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    active_key = f"active:{user_id}"
+
+    if active_key not in pending_bets:
+        return
+
+    text = update.message.text.strip()
+
+    try:
+        amount = int(text)
+    except ValueError:
+        await update.message.reply_text(
+            "⚠️ Introduce solamente un número.\n\n"
+            "Ejemplo: 200"
+        )
+        return
+
+    balance = balances.get(user_id, 1000)
+
+    if amount <= 0:
+        await update.message.reply_text(
+            "⚠️ El monto debe ser mayor que 0."
+        )
+        return
+
+    if amount > balance:
+        await update.message.reply_text(
+            f"⚠️ No tienes suficientes créditos.\n\n"
+            f"Saldo disponible: {balance:,} créditos."
+        )
+        return
+
+    pick = pending_bets[active_key]
+
+    potential_return = amount * pick["odds"]
+
+    pick["amount"] = amount
+    pick["potential_return"] = potential_return
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "✅ Confirmar",
+                callback_data=f"confirm:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ Cancelar",
+                callback_data=f"cancel:{user_id}"
+            ),
+        ]
+    ]
+
+    await update.message.reply_text(
+        "🎯 CONFIRMAR APUESTA\n\n"
+        f"⚽ {pick['home']} vs {pick['away']}\n\n"
+        f"🎯 Selección: {pick['selection']}\n"
+        f"📈 Cuota: {pick['odds']:.2f}\n"
+        f"💵 Apuesta: {amount:,} créditos\n"
+        f"💰 Posible retorno: {potential_return:,.0f} créditos\n\n"
+        "¿Confirmar apuesta?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def confirm_bet(query):
+    user_id = query.from_user.id
+
+    active_key = f"active:{user_id}"
+
+    pick = pending_bets.get(active_key)
+
+    if not pick:
+        await query.edit_message_text(
+            "⚠️ No hay una apuesta pendiente."
+        )
+        return
+
+    amount = pick["amount"]
+    balance = balances.get(user_id, 1000)
+
+    if amount > balance:
+        await query.edit_message_text(
+            "⚠️ Ya no tienes saldo suficiente."
+        )
+        return
+
+    balances[user_id] = balance - amount
+
+    if user_id not in bets:
+        bets[user_id] = []
+
+    bet = {
+        "home": pick["home"],
+        "away": pick["away"],
+        "selection": pick["selection"],
+        "odds": pick["odds"],
+        "amount": amount,
+        "potential_return": pick["potential_return"],
+        "status": "Pendiente",
+    }
+
+    bets[user_id].append(bet)
+
+    del pending_bets[active_key]
+
+    await query.edit_message_text(
+        "✅ APUESTA REGISTRADA\n\n"
+        f"⚽ {pick['home']} vs {pick['away']}\n\n"
+        f"🎯 Selección: {pick['selection']}\n"
+        f"📈 Cuota: {pick['odds']:.2f}\n"
+        f"💵 Apuesta: {amount:,} créditos\n"
+        f"💰 Posible retorno: {pick['potential_return']:,.0f} créditos\n\n"
+        f"💳 Nuevo saldo: {balances[user_id]:,} créditos\n\n"
+        "🎯 La apuesta queda pendiente."
+    )
+
+
+async def cancel_bet(query):
+    user_id = query.from_user.id
+
+    active_key = f"active:{user_id}"
+
+    if active_key in pending_bets:
+        del pending_bets[active_key]
+
+    await query.edit_message_text(
+        "❌ APUESTA CANCELADA\n\n"
+        "No se descontaron créditos.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🏠 Menú principal",
+                    callback_data="home"
+                )
+            ]
+        ])
+    )
+
+
+async def show_bets(query):
+    user_id = query.from_user.id
+
+    user_bets = bets.get(user_id, [])
+
+    if not user_bets:
+        await query.edit_message_text(
+            "🎯 MIS APUESTAS\n\n"
+            "Todavía no tienes apuestas registradas.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Volver",
+                        callback_data="home"
+                    )
+                ]
+            ])
+        )
+        return
+
+    text = "🎯 MIS APUESTAS\n\n"
+
+    for i, bet in enumerate(user_bets, 1):
+        text += (
+            f"#{i}\n"
+            f"⚽ {bet['home']} vs {bet['away']}\n"
+            f"🎯 {bet['selection']}\n"
+            f"📈 Cuota: {bet['odds']:.2f}\n"
+            f"💵 Apuesta: {bet['amount']:,}\n"
+            f"📌 Estado: {bet['status']}\n\n"
+        )
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "⬅️ Volver",
+                    callback_data="home"
+                )
+            ]
+        ])
+    )
 
 
 async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -251,8 +482,7 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "baseball":
         await query.edit_message_text(
             "⚾ BÉISBOL\n\n"
-            "La conexión con los eventos de béisbol "
-            "la agregaremos en el siguiente paso."
+            "Lo agregaremos más adelante."
         )
 
     elif data == "balance":
@@ -260,37 +490,52 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         balance = balances.get(user_id, 1000)
 
         await query.edit_message_text(
-            f"💰 MI SALDO\n\n"
-            f"Créditos disponibles: {balance:,.0f}\n\n"
-            "Saldo completamente virtual durante esta etapa.",
+            "💰 MI SALDO\n\n"
+            f"Créditos disponibles: {balance:,}\n\n"
+            "Saldo completamente virtual.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Volver", callback_data="home")]
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Volver",
+                        callback_data="home"
+                    )
+                ]
             ])
         )
 
     elif data == "bets":
-        await query.edit_message_text(
-            "🎯 MIS APUESTAS\n\n"
-            "Todavía no tienes apuestas registradas.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Volver", callback_data="home")]
-            ])
-        )
+        await show_bets(query)
 
     elif data == "home":
         keyboard = [
             [
-                InlineKeyboardButton("⚽ Fútbol", callback_data="football"),
-                InlineKeyboardButton("⚾ Béisbol", callback_data="baseball"),
+                InlineKeyboardButton(
+                    "⚽ Fútbol",
+                    callback_data="football"
+                ),
+                InlineKeyboardButton(
+                    "⚾ Béisbol",
+                    callback_data="baseball"
+                ),
             ],
             [
-                InlineKeyboardButton("💰 Mi saldo", callback_data="balance"),
-                InlineKeyboardButton("🎯 Mis apuestas", callback_data="bets"),
+                InlineKeyboardButton(
+                    "💰 Mi saldo",
+                    callback_data="balance"
+                ),
+                InlineKeyboardButton(
+                    "🎯 Mis apuestas",
+                    callback_data="bets"
+                ),
             ],
         ]
 
+        user_id = query.from_user.id
+        balance = balances.get(user_id, 1000)
+
         await query.edit_message_text(
             "🏆 SPORTS BOT\n\n"
+            f"💰 Saldo: {balance:,} créditos\n\n"
             "Selecciona una opción:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -303,13 +548,15 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, sport_key, event_id = data.split(":", 2)
         await show_game(query, sport_key, event_id)
 
-    elif data == "selection":
-        await query.edit_message_text(
-            "🎯 SELECCIÓN\n\n"
-            "La selección de la cuota funciona correctamente.\n\n"
-            "💵 En el siguiente paso agregaremos "
-            "la entrada del monto y la confirmación de la apuesta."
-        )
+    elif data.startswith("pick:"):
+        pick_id = data.split(":", 1)[1]
+        await ask_amount(query, pick_id)
+
+    elif data.startswith("confirm:"):
+        await confirm_bet(query)
+
+    elif data.startswith("cancel:"):
+        await cancel_bet(query)
 
 
 def main():
@@ -322,6 +569,12 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            handle_amount
+        )
+    )
     app.add_handler(CallbackQueryHandler(button))
 
     print("Bot iniciado correctamente...")
