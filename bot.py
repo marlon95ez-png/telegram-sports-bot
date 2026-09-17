@@ -620,6 +620,7 @@ async def handle_amount(
 
 
 async def confirm_bet(query):
+async def confirm_bet(query):
     user_id = query.from_user.id
 
     active_key = f"active:{user_id}"
@@ -638,7 +639,7 @@ async def confirm_bet(query):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
 
-                # 1. Obtener el usuario y bloquear su fila
+                # Obtener usuario y bloquear su fila
                 cursor.execute("""
                     SELECT id, balance
                     FROM users
@@ -656,7 +657,7 @@ async def confirm_bet(query):
                 db_user_id = user[0]
                 balance = user[1]
 
-                # 2. Verificar saldo dentro de la misma transacción
+                # Verificar saldo dentro de la transacción
                 if amount > balance:
                     await query.edit_message_text(
                         "⚠️ Ya no tienes saldo suficiente.\n\n"
@@ -665,10 +666,9 @@ async def confirm_bet(query):
                     )
                     return
 
-                # 3. Calcular nuevo saldo
                 new_balance = balance - amount
 
-                # 4. Actualizar saldo
+                # Descontar saldo
                 cursor.execute("""
                     UPDATE users
                     SET balance = %s,
@@ -679,7 +679,7 @@ async def confirm_bet(query):
                     db_user_id
                 ))
 
-                # 5. Registrar apuesta en bets
+                # Registrar apuesta
                 event_name = (
                     f"{pick['home']} vs "
                     f"{pick['away']}"
@@ -718,7 +718,7 @@ async def confirm_bet(query):
 
                 bet_id = cursor.fetchone()[0]
 
-                # 6. Registrar movimiento de saldo
+                # Registrar movimiento de saldo
                 cursor.execute("""
                     INSERT INTO transactions (
                         user_id,
@@ -738,10 +738,7 @@ async def confirm_bet(query):
                     new_balance,
                 ))
 
-                # El COMMIT ocurre automáticamente al salir
-                # correctamente del bloque "with conn"
-
-        # 7. Solo después del COMMIT eliminamos la apuesta temporal
+        # Solo después del COMMIT
         del pending_bets[active_key]
 
         await query.edit_message_text(
