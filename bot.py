@@ -786,19 +786,69 @@ async def cancel_bet(query):
                     callback_data="home"
                 )
             ]
-        ])
+        ])      
     )
+
 
 
 async def show_bets(query):
     user_id = query.from_user.id
 
-    user_bets = bets.get(user_id, [])
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        event_name,
+                        selection,
+                        odds,
+                        stake,
+                        status
+                    FROM bets
+                    WHERE user_id = (
+                        SELECT id
+                        FROM users
+                        WHERE telegram_id = %s
+                    )
+                    ORDER BY id DESC
+                    """,
+                    (user_id,)
+                )
 
-    if not user_bets:
+                user_bets = cursor.fetchall()
+
+        if not user_bets:
+            await query.edit_message_text(
+                "🎯 MIS APUESTAS\n\n"
+                "Todavía no tienes apuestas registradas.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data="home"
+                        )
+                    ]
+                ])
+            )
+            return
+
+        text = "🎯 MIS APUESTAS\n\n"
+
+        for i, bet in enumerate(user_bets, 1):
+            event_name, selection, odds, stake, status = bet
+
+            text += (
+                f"#{i}\n"
+                f"⚽ {event_name}\n"
+                f"🎯 {selection}\n"
+                f"📈 Cuota: {odds:.2f}\n"
+                f"💵 Apuesta: {stake:,}\n"
+                f"📌 Estado: {status}\n\n"
+            )
+
         await query.edit_message_text(
-            "🎯 MIS APUESTAS\n\n"
-            "Todavía no tienes apuestas registradas.",
+            text,
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -808,38 +858,21 @@ async def show_bets(query):
                 ]
             ])
         )
-        return
 
-    text = "🎯 MIS APUESTAS\n\n"
+    except Exception as e:
+        print("❌ ERROR MIS APUESTAS:", e)
 
-    for i, bet in enumerate(
-        user_bets,
-        1
-    ):
-        text += (
-            f"#{i}\n"
-            f"⚽ {bet['home']} vs "
-            f"{bet['away']}\n"
-            f"🎯 {bet['selection']}\n"
-            f"📈 Cuota: "
-            f"{bet['odds']:.2f}\n"
-            f"💵 Apuesta: "
-            f"{bet['amount']:,}\n"
-            f"📌 Estado: "
-            f"{bet['status']}\n\n"
+        await query.edit_message_text(
+            "❌ No se pudieron cargar tus apuestas.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Volver",
+                        callback_data="home"
+                    )
+                ]
+            ])
         )
-
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "⬅️ Volver",
-                    callback_data="home"
-                )
-            ]
-        ])
-    )
 
 
 async def button(
