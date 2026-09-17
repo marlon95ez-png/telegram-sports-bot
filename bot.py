@@ -97,22 +97,22 @@ def create_database_tables():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
             """)
-            
+
             cursor.execute("""
-    CREATE TABLE IF NOT EXISTS unconfirmed_bets (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        event_id TEXT NOT NULL,
-        event_name TEXT NOT NULL,
-        sport TEXT NOT NULL,
-        competition TEXT,
-        selection TEXT NOT NULL,
-        odds NUMERIC(10,2) NOT NULL,
-        stake INTEGER,
-        potential_return NUMERIC(10,2),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-""")
+                CREATE TABLE IF NOT EXISTS unconfirmed_bets (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    event_id TEXT NOT NULL,
+                    event_name TEXT NOT NULL,
+                    sport TEXT NOT NULL,
+                    competition TEXT,
+                    selection TEXT NOT NULL,
+                    odds NUMERIC(10,2) NOT NULL,
+                    stake INTEGER,
+                    potential_return NUMERIC(10,2),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
         conn.commit()
 
@@ -503,7 +503,6 @@ async def show_game(query, sport_key, event_id):
         await query.edit_message_text(
             "⚠️ No pude obtener las cuotas."
         )
-        
 
 
 async def ask_amount(query, pick_id):
@@ -645,7 +644,7 @@ async def confirm_bet(query):
 
     if not pick:
         await query.edit_message_text(
-            "⚠️ No hay una apuesta pendiente."
+            "⚠️ No hay una apuesta sin confirmar."
         )
         return
 
@@ -655,7 +654,6 @@ async def confirm_bet(query):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
 
-                # Obtener usuario y bloquear su fila
                 cursor.execute("""
                     SELECT id, balance
                     FROM users
@@ -673,7 +671,6 @@ async def confirm_bet(query):
                 db_user_id = user[0]
                 balance = user[1]
 
-                # Verificar saldo dentro de la transacción
                 if amount > balance:
                     await query.edit_message_text(
                         "⚠️ Ya no tienes saldo suficiente.\n\n"
@@ -684,7 +681,6 @@ async def confirm_bet(query):
 
                 new_balance = balance - amount
 
-                # Descontar saldo
                 cursor.execute("""
                     UPDATE users
                     SET balance = %s,
@@ -695,7 +691,6 @@ async def confirm_bet(query):
                     db_user_id
                 ))
 
-                # Registrar apuesta
                 event_name = (
                     f"{pick['home']} vs "
                     f"{pick['away']}"
@@ -734,7 +729,6 @@ async def confirm_bet(query):
 
                 bet_id = cursor.fetchone()[0]
 
-                # Registrar movimiento de saldo
                 cursor.execute("""
                     INSERT INTO transactions (
                         user_id,
@@ -754,7 +748,6 @@ async def confirm_bet(query):
                     new_balance,
                 ))
 
-        # Solo después del COMMIT
         del pending_bets[active_key]
 
         await query.edit_message_text(
@@ -767,7 +760,7 @@ async def confirm_bet(query):
             f"{pick['potential_return']:,.0f} créditos\n\n"
             f"💳 Nuevo saldo: "
             f"{float(new_balance):,.0f} créditos\n\n"
-            "🎯 La apuesta queda pendiente."
+            "🎯 La apuesta queda registrada."
         )
 
         print(
@@ -802,9 +795,8 @@ async def cancel_bet(query):
                     callback_data="home"
                 )
             ]
-        ])      
+        ])
     )
-
 
 
 async def show_bets(query):
@@ -891,6 +883,31 @@ async def show_bets(query):
         )
 
 
+def home_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "⚽ Fútbol",
+                callback_data="football"
+            ),
+            InlineKeyboardButton(
+                "⚾ Béisbol",
+                callback_data="baseball"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "💰 Mi saldo",
+                callback_data="balance"
+            ),
+            InlineKeyboardButton(
+                "🎯 Mis apuestas",
+                callback_data="bets"
+            ),
+        ],
+    ])
+
+
 async def button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -949,29 +966,6 @@ async def button(
         await show_bets(query)
 
     elif data == "home":
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "⚽ Fútbol",
-                    callback_data="football"
-                ),
-                InlineKeyboardButton(
-                    "⚾ Béisbol",
-                    callback_data="baseball"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "💰 Mi saldo",
-                    callback_data="balance"
-                ),
-                InlineKeyboardButton(
-                    "🎯 Mis apuestas",
-                    callback_data="bets"
-                ),
-            ],
-        ]
-
         user_id = query.from_user.id
 
         try:
@@ -989,7 +983,7 @@ async def button(
             f"💰 Saldo: "
             f"{balance:,.0f} créditos\n\n"
             "Selecciona una opción:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=home_keyboard(),
         )
 
     elif data.startswith("sport:"):
