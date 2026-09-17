@@ -62,6 +62,75 @@ def test_database_connection():
     print("✅ CONEXIÓN CON NEON CORRECTA:", result)
 
 
+def create_database_tables():
+    import psycopg
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id BIGSERIAL PRIMARY KEY,
+                    telegram_id BIGINT UNIQUE NOT NULL,
+                    username TEXT,
+                    balance NUMERIC(18,2) NOT NULL DEFAULT 1000,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bets (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    sport TEXT NOT NULL,
+                    competition TEXT,
+                    event_id TEXT NOT NULL,
+                    event_name TEXT,
+                    selection TEXT NOT NULL,
+                    odds NUMERIC(10,4) NOT NULL,
+                    stake NUMERIC(18,2) NOT NULL,
+                    potential_return NUMERIC(18,2) NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Pendiente',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS transactions (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    type TEXT NOT NULL,
+                    amount NUMERIC(18,2) NOT NULL,
+                    balance_before NUMERIC(18,2) NOT NULL,
+                    balance_after NUMERIC(18,2) NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS pending_bets (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id),
+                    sport TEXT,
+                    competition TEXT,
+                    event_id TEXT NOT NULL,
+                    home_team TEXT,
+                    away_team TEXT,
+                    selection TEXT NOT NULL,
+                    odds NUMERIC(10,4) NOT NULL,
+                    stake NUMERIC(18,2),
+                    potential_return NUMERIC(18,2),
+                    expires_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+        conn.commit()
+
+    print("✅ TABLAS DE NEON CREADAS/VERIFICADAS")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
@@ -578,6 +647,7 @@ def main():
         raise ValueError("Falta ODDS_API_KEY")
 
     test_database_connection()
+    create_database_tables()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
