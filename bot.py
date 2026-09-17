@@ -100,17 +100,17 @@ def create_database_tables():
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS unconfirmed_bets (
-                    id SERIAL PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     event_id TEXT NOT NULL,
                     event_name TEXT NOT NULL,
                     sport TEXT NOT NULL,
                     competition TEXT,
                     selection TEXT NOT NULL,
                     odds NUMERIC(10,2) NOT NULL,
-                    stake INTEGER,
+                    stake NUMERIC(18,2),
                     potential_return NUMERIC(10,2),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
             """)
 
@@ -187,20 +187,6 @@ def get_user_balance(telegram_id):
         return None
 
     return float(result[0])
-
-
-def update_user_balance(telegram_id, new_balance):
-    with get_db_connection() as conn:
-        with conn.cursor() as cursor:
-
-            cursor.execute("""
-                UPDATE users
-                SET balance = %s,
-                    updated_at = NOW()
-                WHERE telegram_id = %s
-            """, (new_balance, telegram_id))
-
-        conn.commit()
 
 
 def get_sports():
@@ -609,6 +595,92 @@ async def handle_amount(
     pick["amount"] = amount
     pick["potential_return"] = potential_return
 
+    # ==========================================================
+    # GUARDAR APUESTA SIN CONFIRMAR EN NEON
+    # ==========================================================
+
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+
+                cursor.execute("""
+                    SELECT id
+                    FROM users
+                    WHERE telegram_id = %s
+                """, (user_id,))
+
+                user = cursor.fetchone()
+
+                if not user:
+                    raise ValueError(
+                        "Usuario no encontrado"
+                    )
+
+                db_user_id = user[0]
+
+                # El usuario tendrá una sola apuesta sin confirmar activa.
+                cursor.execute("""
+                    DELETE FROM unconfirmed_bets
+                    WHERE user_id = %s
+                """, (db_user_id,))
+
+                event_name = (
+                    f"{pick['home']} vs "
+                    f"{pick['away']}"
+                )
+
+                cursor.execute("""
+                    INSERT INTO unconfirmed_bets (
+                        user_id,
+                        event_id,
+                        event_name,
+                        sport,
+                        competition,
+                        selection,
+                        odds,
+                        stake,
+                        potential_return
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s
+                    )
+                    RETURNING id
+                """, (
+                    db_user_id,
+                    pick["event_id"],
+                    event_name,
+                    "football",
+                    pick.get("sport_key"),
+                    pick["selection"],
+                    pick["odds"],
+                    amount,
+                    potential_return,
+                ))
+
+                unconfirmed_id = cursor.fetchone()[0]
+
+        pick["unconfirmed_id"] = unconfirmed_id
+
+        print(
+            "✅ APUESTA SIN CONFIRMAR GUARDADA EN NEON: "
+            f"id={unconfirmed_id}, "
+            f"user_id={db_user_id}"
+        )
+
+    except Exception as e:
+        print(
+            "ERROR SAVE UNCONFIRMED:",
+            e
+        )
+
+        await update.message.reply_text(
+            "⚠️ No se pudo guardar la apuesta sin confirmar.\n\n"
+            "Inténtalo nuevamente."
+        )
+
+        return
+
     keyboard = [
         [
             InlineKeyboardButton(
@@ -681,21 +753,12 @@ async def confirm_bet(query):
 
                 new_balance = balance - amount
 
-                cursor.execute("""
-                    UPDATE users
-                    SET balance = %s,
-                        updated_at = NOW()
-                    WHERE id = %s
-                """, (
-                    new_balance,
-                    db_user_id
-                ))
-
                 event_name = (
                     f"{pick['home']} vs "
                     f"{pick['away']}"
                 )
 
+                # Guardar apuesta confirmada.
                 cursor.execute("""
                     INSERT INTO bets (
                         user_id,
@@ -729,6 +792,18 @@ async def confirm_bet(query):
 
                 bet_id = cursor.fetchone()[0]
 
+                # Descontar saldo.
+                cursor.execute("""
+                    UPDATE users
+                    SET balance = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (
+                    new_balance,
+                    db_user_id
+                ))
+
+                # Registrar transacción.
                 cursor.execute("""
                     INSERT INTO transactions (
                         user_id,
@@ -748,6 +823,19 @@ async def confirm_bet(query):
                     new_balance,
                 ))
 
+                # ==================================================
+                # ELIMINAR APUESTA SIN CONFIRMAR
+                # ==================================================
+
+                cursor.execute("""
+                    DELETE FROM unconfirmed_bets
+                    WHERE id = %s
+                    AND user_id = %s
+                """, (
+                    pick.get("unconfirmed_id"),
+                    db_user_id
+                ))
+
         del pending_bets[active_key]
 
         await query.edit_message_text(
@@ -765,11 +853,15 @@ async def confirm_bet(query):
 
         print(
             f"✅ APUESTA GUARDADA EN NEON: "
-            f"bet_id={bet_id}, user_id={db_user_id}"
+            f"bet_id={bet_id}, "
+            f"user_id={db_user_id}"
         )
 
     except Exception as e:
-        print("ERROR CONFIRM BET:", e)
+        print(
+            "ERROR CONFIRM BET:",
+            e
+        )
 
         await query.edit_message_text(
             "⚠️ No se pudo registrar la apuesta.\n\n"
@@ -782,8 +874,34 @@ async def cancel_bet(query):
 
     active_key = f"active:{user_id}"
 
-    if active_key in pending_bets:
-        del pending_bets[active_key]
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+
+                cursor.execute("""
+                    DELETE FROM unconfirmed_bets
+                    WHERE user_id = (
+                        SELECT id
+                        FROM users
+                        WHERE telegram_id = %s
+                    )
+                """, (user_id,))
+
+        if active_key in pending_bets:
+            del pending_bets[active_key]
+
+    except Exception as e:
+        print(
+            "ERROR CANCEL UNCONFIRMED:",
+            e
+        )
+
+        await query.edit_message_text(
+            "⚠️ No se pudo cancelar correctamente "
+            "la apuesta sin confirmar."
+        )
+
+        return
 
     await query.edit_message_text(
         "❌ APUESTA CANCELADA\n\n"
@@ -805,6 +923,7 @@ async def show_bets(query):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+
                 cursor.execute(
                     """
                     SELECT
@@ -843,7 +962,10 @@ async def show_bets(query):
 
         text = "🎯 MIS APUESTAS\n\n"
 
-        for i, bet in enumerate(user_bets, 1):
+        for i, bet in enumerate(
+            user_bets,
+            1
+        ):
             event_name, selection, odds, stake, status = bet
 
             text += (
@@ -868,7 +990,10 @@ async def show_bets(query):
         )
 
     except Exception as e:
-        print("❌ ERROR MIS APUESTAS:", e)
+        print(
+            "❌ ERROR MIS APUESTAS:",
+            e
+        )
 
         await query.edit_message_text(
             "❌ No se pudieron cargar tus apuestas.",
@@ -919,15 +1044,18 @@ async def button(
     data = query.data
 
     if data == "football":
+
         await show_sports(query)
 
     elif data == "baseball":
+
         await query.edit_message_text(
             "⚾ BÉISBOL\n\n"
             "Lo agregaremos más adelante."
         )
 
     elif data == "balance":
+
         user_id = query.from_user.id
 
         try:
@@ -940,11 +1068,15 @@ async def button(
                 return
 
         except Exception as e:
-            print("ERROR BALANCE:", e)
+            print(
+                "ERROR BALANCE:",
+                e
+            )
 
             await query.edit_message_text(
                 "⚠️ No pude consultar tu saldo."
             )
+
             return
 
         await query.edit_message_text(
@@ -963,9 +1095,11 @@ async def button(
         )
 
     elif data == "bets":
+
         await show_bets(query)
 
     elif data == "home":
+
         user_id = query.from_user.id
 
         try:
@@ -975,7 +1109,11 @@ async def button(
                 balance = 1000
 
         except Exception as e:
-            print("ERROR BALANCE:", e)
+            print(
+                "ERROR BALANCE:",
+                e
+            )
+
             balance = 1000
 
         await query.edit_message_text(
@@ -987,6 +1125,7 @@ async def button(
         )
 
     elif data.startswith("sport:"):
+
         sport_key = data.split(
             ":",
             1
@@ -998,6 +1137,7 @@ async def button(
         )
 
     elif data.startswith("game:"):
+
         _, sport_key, event_id = data.split(
             ":",
             2
@@ -1010,6 +1150,7 @@ async def button(
         )
 
     elif data.startswith("pick:"):
+
         pick_id = data.split(
             ":",
             1
@@ -1021,23 +1162,33 @@ async def button(
         )
 
     elif data.startswith("confirm:"):
+
         await confirm_bet(query)
 
     elif data.startswith("cancel:"):
+
         await cancel_bet(query)
 
 
 def main():
+
     if not BOT_TOKEN:
-        raise ValueError("Falta BOT_TOKEN")
+        raise ValueError(
+            "Falta BOT_TOKEN"
+        )
 
     if not ODDS_API_KEY:
-        raise ValueError("Falta ODDS_API_KEY")
+        raise ValueError(
+            "Falta ODDS_API_KEY"
+        )
 
     if not DATABASE_URL:
-        raise ValueError("Falta DATABASE_URL")
+        raise ValueError(
+            "Falta DATABASE_URL"
+        )
 
     test_database_connection()
+
     create_database_tables()
 
     app = Application.builder().token(
