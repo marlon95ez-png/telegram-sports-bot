@@ -96,7 +96,9 @@ def create_database_tables():
                     expires_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-            """)conn.execute("""
+            """)
+            
+            cursor.execute("""
     CREATE TABLE IF NOT EXISTS unconfirmed_bets (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
