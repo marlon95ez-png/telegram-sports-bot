@@ -620,7 +620,6 @@ async def handle_amount(
 
 
 async def confirm_bet(query):
-async def confirm_bet(query):
     user_id = query.from_user.id
 
     active_key = f"active:{user_id}"
