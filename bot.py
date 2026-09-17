@@ -1,5 +1,6 @@
 import os
 import requests
+import psycopg
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,46 +16,19 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-balances = {}
 bets = {}
 pending_bets = {}
 
 
-def get_sports():
-    url = "https://api.the-odds-api.com/v4/sports/"
-    params = {
-        "apiKey": ODDS_API_KEY
-    }
-
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-
-    return response.json()
-
-
-def get_odds(sport_key):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
-
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "us",
-        "markets": "h2h",
-        "oddsFormat": "decimal",
-    }
-
-    response = requests.get(url, params=params, timeout=15)
-    response.raise_for_status()
-
-    return response.json()
-
-
-def test_database_connection():
-    import psycopg
-
+def get_db_connection():
     if not DATABASE_URL:
         raise ValueError("Falta DATABASE_URL")
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    return psycopg.connect(DATABASE_URL)
+
+
+def test_database_connection():
+    with get_db_connection() as conn:
         with conn.cursor() as cursor:
             cursor.execute("SELECT 1")
             result = cursor.fetchone()
@@ -63,9 +37,7 @@ def test_database_connection():
 
 
 def create_database_tables():
-    import psycopg
-
-    with psycopg.connect(DATABASE_URL) as conn:
+    with get_db_connection() as conn:
         with conn.cursor() as cursor:
 
             cursor.execute("""
@@ -131,27 +103,173 @@ def create_database_tables():
     print("✅ TABLAS DE NEON CREADAS/VERIFICADAS")
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+def get_or_create_user(telegram_user):
+    telegram_id = telegram_user.id
+    username = telegram_user.username
 
-    if user_id not in balances:
-        balances[user_id] = 1000
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                SELECT id, balance
+                FROM users
+                WHERE telegram_id = %s
+            """, (telegram_id,))
+
+            user = cursor.fetchone()
+
+            if user:
+                cursor.execute("""
+                    UPDATE users
+                    SET username = %s,
+                        updated_at = NOW()
+                    WHERE telegram_id = %s
+                """, (username, telegram_id))
+
+                conn.commit()
+
+                return {
+                    "id": user[0],
+                    "balance": float(user[1]),
+                }
+
+            cursor.execute("""
+                INSERT INTO users (
+                    telegram_id,
+                    username,
+                    balance
+                )
+                VALUES (%s, %s, 1000)
+                RETURNING id, balance
+            """, (telegram_id, username))
+
+            new_user = cursor.fetchone()
+
+        conn.commit()
+
+    print("✅ USUARIO GUARDADO EN NEON:", telegram_id)
+
+    return {
+        "id": new_user[0],
+        "balance": float(new_user[1]),
+    }
+
+
+def get_user_balance(telegram_id):
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                SELECT balance
+                FROM users
+                WHERE telegram_id = %s
+            """, (telegram_id,))
+
+            result = cursor.fetchone()
+
+    if not result:
+        return None
+
+    return float(result[0])
+
+
+def update_user_balance(telegram_id, new_balance):
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+
+            cursor.execute("""
+                UPDATE users
+                SET balance = %s,
+                    updated_at = NOW()
+                WHERE telegram_id = %s
+            """, (new_balance, telegram_id))
+
+        conn.commit()
+
+
+def get_sports():
+    url = "https://api.the-odds-api.com/v4/sports/"
+
+    params = {
+        "apiKey": ODDS_API_KEY
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_odds(sport_key):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": "h2h",
+        "oddsFormat": "decimal",
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_user = update.effective_user
+
+    try:
+        user = get_or_create_user(telegram_user)
+        balance = user["balance"]
+
+    except Exception as e:
+        print("ERROR USER:", e)
+
+        await update.message.reply_text(
+            "⚠️ No pude acceder a tu cuenta.\n\n"
+            "Inténtalo nuevamente."
+        )
+
+        return
 
     keyboard = [
         [
-            InlineKeyboardButton("⚽ Fútbol", callback_data="football"),
-            InlineKeyboardButton("⚾ Béisbol", callback_data="baseball"),
+            InlineKeyboardButton(
+                "⚽ Fútbol",
+                callback_data="football"
+            ),
+            InlineKeyboardButton(
+                "⚾ Béisbol",
+                callback_data="baseball"
+            ),
         ],
         [
-            InlineKeyboardButton("💰 Mi saldo", callback_data="balance"),
-            InlineKeyboardButton("🎯 Mis apuestas", callback_data="bets"),
+            InlineKeyboardButton(
+                "💰 Mi saldo",
+                callback_data="balance"
+            ),
+            InlineKeyboardButton(
+                "🎯 Mis apuestas",
+                callback_data="bets"
+            ),
         ],
     ]
 
     await update.message.reply_text(
         "👋 ¡Bienvenido!\n\n"
         "🏆 Sports Bot\n\n"
-        f"💵 Saldo virtual: {balances[user_id]:,} créditos\n\n"
+        f"💵 Saldo virtual: {balance:,.0f} créditos\n\n"
         "Selecciona una opción:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -163,7 +281,8 @@ async def show_sports(query):
 
         football = [
             s for s in sports
-            if s.get("group") == "Soccer" and s.get("active")
+            if s.get("group") == "Soccer"
+            and s.get("active")
         ]
 
         keyboard = []
@@ -177,11 +296,17 @@ async def show_sports(query):
             ])
 
         keyboard.append([
-            InlineKeyboardButton("⬅️ Volver", callback_data="home")
+            InlineKeyboardButton(
+                "⬅️ Volver",
+                callback_data="home"
+            )
         ])
 
         if not football:
-            text = "⚽ No hay ligas de fútbol disponibles en este momento."
+            text = (
+                "⚽ No hay ligas de fútbol "
+                "disponibles en este momento."
+            )
         else:
             text = (
                 "⚽ FÚTBOL\n\n"
@@ -208,20 +333,30 @@ async def show_games(query, sport_key):
 
         if not games:
             await query.edit_message_text(
-                "⚽ No hay partidos disponibles para esta competición."
+                "⚽ No hay partidos disponibles "
+                "para esta competición."
             )
             return
 
         keyboard = []
 
         for game in games[:15]:
-            home = game.get("home_team", "Local")
-            away = game.get("away_team", "Visitante")
+            home = game.get(
+                "home_team",
+                "Local"
+            )
+
+            away = game.get(
+                "away_team",
+                "Visitante"
+            )
 
             keyboard.append([
                 InlineKeyboardButton(
                     f"⚽ {home} vs {away}",
-                    callback_data=f"game:{sport_key}:{game['id']}"
+                    callback_data=(
+                        f"game:{sport_key}:{game['id']}"
+                    )
                 )
             ])
 
@@ -252,7 +387,10 @@ async def show_game(query, sport_key, event_id):
         games = get_odds(sport_key)
 
         game = next(
-            (g for g in games if g["id"] == event_id),
+            (
+                g for g in games
+                if g["id"] == event_id
+            ),
             None
         )
 
@@ -267,10 +405,20 @@ async def show_game(query, sport_key, event_id):
 
         unique = {}
 
-        for bookmaker in game.get("bookmakers", []):
-            for market in bookmaker.get("markets", []):
+        for bookmaker in game.get(
+            "bookmakers",
+            []
+        ):
+            for market in bookmaker.get(
+                "markets",
+                []
+            ):
                 if market["key"] == "h2h":
-                    for outcome in market.get("outcomes", []):
+
+                    for outcome in market.get(
+                        "outcomes",
+                        []
+                    ):
                         name = outcome["name"]
                         price = outcome["price"]
 
@@ -281,14 +429,13 @@ async def show_game(query, sport_key, event_id):
 
         for name, price in unique.items():
 
-            callback = (
-                f"pick:{sport_key}:{event_id}:"
-                f"{name}"
-            )
-
             user_id = query.from_user.id
 
-            pick_id = f"{user_id}_{event_id}_{len(pending_bets)}"
+            pick_id = (
+                f"{user_id}_"
+                f"{event_id}_"
+                f"{len(pending_bets)}"
+            )
 
             pending_bets[pick_id] = {
                 "sport_key": sport_key,
@@ -321,9 +468,13 @@ async def show_game(query, sport_key, event_id):
         )
 
         for name, price in unique.items():
-            text += f"• {name}: {price:.2f}\n"
+            text += (
+                f"• {name}: {price:.2f}\n"
+            )
 
-        text += "\n🎯 Selecciona tu apuesta:"
+        text += (
+            "\n🎯 Selecciona tu apuesta:"
+        )
 
         await query.edit_message_text(
             text,
@@ -349,7 +500,22 @@ async def ask_amount(query, pick_id):
         )
         return
 
-    balance = balances.get(user_id, 1000)
+    try:
+        balance = get_user_balance(user_id)
+
+        if balance is None:
+            await query.edit_message_text(
+                "⚠️ No encontré tu cuenta."
+            )
+            return
+
+    except Exception as e:
+        print("ERROR BALANCE:", e)
+
+        await query.edit_message_text(
+            "⚠️ No pude consultar tu saldo."
+        )
+        return
 
     pending_bets[f"active:{user_id}"] = pick
 
@@ -358,13 +524,18 @@ async def ask_amount(query, pick_id):
         f"⚽ {pick['home']} vs {pick['away']}\n\n"
         f"Tu selección: {pick['selection']}\n"
         f"📈 Cuota: {pick['odds']:.2f}\n\n"
-        f"💰 Saldo disponible: {balance:,} créditos\n\n"
-        "💵 Escribe ahora el monto que deseas apostar.\n\n"
+        f"💰 Saldo disponible: "
+        f"{balance:,.0f} créditos\n\n"
+        "💵 Escribe ahora el monto "
+        "que deseas apostar.\n\n"
         "Ejemplo: 200"
     )
 
 
-async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_amount(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     user_id = update.effective_user.id
 
     active_key = f"active:{user_id}"
@@ -376,6 +547,7 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         amount = int(text)
+
     except ValueError:
         await update.message.reply_text(
             "⚠️ Introduce solamente un número.\n\n"
@@ -383,7 +555,22 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    balance = balances.get(user_id, 1000)
+    try:
+        balance = get_user_balance(user_id)
+
+        if balance is None:
+            await update.message.reply_text(
+                "⚠️ No encontré tu cuenta."
+            )
+            return
+
+    except Exception as e:
+        print("ERROR BALANCE:", e)
+
+        await update.message.reply_text(
+            "⚠️ No pude consultar tu saldo."
+        )
+        return
 
     if amount <= 0:
         await update.message.reply_text(
@@ -394,7 +581,8 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if amount > balance:
         await update.message.reply_text(
             f"⚠️ No tienes suficientes créditos.\n\n"
-            f"Saldo disponible: {balance:,} créditos."
+            f"Saldo disponible: "
+            f"{balance:,.0f} créditos."
         )
         return
 
@@ -424,7 +612,8 @@ async def handle_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Selección: {pick['selection']}\n"
         f"📈 Cuota: {pick['odds']:.2f}\n"
         f"💵 Apuesta: {amount:,} créditos\n"
-        f"💰 Posible retorno: {potential_return:,.0f} créditos\n\n"
+        f"💰 Posible retorno: "
+        f"{potential_return:,.0f} créditos\n\n"
         "¿Confirmar apuesta?",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -444,7 +633,23 @@ async def confirm_bet(query):
         return
 
     amount = pick["amount"]
-    balance = balances.get(user_id, 1000)
+
+    try:
+        balance = get_user_balance(user_id)
+
+        if balance is None:
+            await query.edit_message_text(
+                "⚠️ No encontré tu cuenta."
+            )
+            return
+
+    except Exception as e:
+        print("ERROR BALANCE:", e)
+
+        await query.edit_message_text(
+            "⚠️ No pude consultar tu saldo."
+        )
+        return
 
     if amount > balance:
         await query.edit_message_text(
@@ -452,7 +657,22 @@ async def confirm_bet(query):
         )
         return
 
-    balances[user_id] = balance - amount
+    new_balance = balance - amount
+
+    try:
+        update_user_balance(
+            user_id,
+            new_balance
+        )
+
+    except Exception as e:
+        print("ERROR UPDATE BALANCE:", e)
+
+        await query.edit_message_text(
+            "⚠️ No pude actualizar tu saldo.\n\n"
+            "La apuesta no fue registrada."
+        )
+        return
 
     if user_id not in bets:
         bets[user_id] = []
@@ -477,8 +697,10 @@ async def confirm_bet(query):
         f"🎯 Selección: {pick['selection']}\n"
         f"📈 Cuota: {pick['odds']:.2f}\n"
         f"💵 Apuesta: {amount:,} créditos\n"
-        f"💰 Posible retorno: {pick['potential_return']:,.0f} créditos\n\n"
-        f"💳 Nuevo saldo: {balances[user_id]:,} créditos\n\n"
+        f"💰 Posible retorno: "
+        f"{pick['potential_return']:,.0f} créditos\n\n"
+        f"💳 Nuevo saldo: "
+        f"{new_balance:,.0f} créditos\n\n"
         "🎯 La apuesta queda pendiente."
     )
 
@@ -527,14 +749,21 @@ async def show_bets(query):
 
     text = "🎯 MIS APUESTAS\n\n"
 
-    for i, bet in enumerate(user_bets, 1):
+    for i, bet in enumerate(
+        user_bets,
+        1
+    ):
         text += (
             f"#{i}\n"
-            f"⚽ {bet['home']} vs {bet['away']}\n"
+            f"⚽ {bet['home']} vs "
+            f"{bet['away']}\n"
             f"🎯 {bet['selection']}\n"
-            f"📈 Cuota: {bet['odds']:.2f}\n"
-            f"💵 Apuesta: {bet['amount']:,}\n"
-            f"📌 Estado: {bet['status']}\n\n"
+            f"📈 Cuota: "
+            f"{bet['odds']:.2f}\n"
+            f"💵 Apuesta: "
+            f"{bet['amount']:,}\n"
+            f"📌 Estado: "
+            f"{bet['status']}\n\n"
         )
 
     await query.edit_message_text(
@@ -550,8 +779,12 @@ async def show_bets(query):
     )
 
 
-async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     query = update.callback_query
+
     await query.answer()
 
     data = query.data
@@ -567,11 +800,28 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "balance":
         user_id = query.from_user.id
-        balance = balances.get(user_id, 1000)
+
+        try:
+            balance = get_user_balance(user_id)
+
+            if balance is None:
+                await query.edit_message_text(
+                    "⚠️ No encontré tu cuenta."
+                )
+                return
+
+        except Exception as e:
+            print("ERROR BALANCE:", e)
+
+            await query.edit_message_text(
+                "⚠️ No pude consultar tu saldo."
+            )
+            return
 
         await query.edit_message_text(
             "💰 MI SALDO\n\n"
-            f"Créditos disponibles: {balance:,}\n\n"
+            f"Créditos disponibles: "
+            f"{balance:,.0f}\n\n"
             "Saldo completamente virtual.",
             reply_markup=InlineKeyboardMarkup([
                 [
@@ -611,26 +861,58 @@ async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
 
         user_id = query.from_user.id
-        balance = balances.get(user_id, 1000)
+
+        try:
+            balance = get_user_balance(user_id)
+
+            if balance is None:
+                balance = 1000
+
+        except Exception as e:
+            print("ERROR BALANCE:", e)
+            balance = 1000
 
         await query.edit_message_text(
             "🏆 SPORTS BOT\n\n"
-            f"💰 Saldo: {balance:,} créditos\n\n"
+            f"💰 Saldo: "
+            f"{balance:,.0f} créditos\n\n"
             "Selecciona una opción:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     elif data.startswith("sport:"):
-        sport_key = data.split(":", 1)[1]
-        await show_games(query, sport_key)
+        sport_key = data.split(
+            ":",
+            1
+        )[1]
+
+        await show_games(
+            query,
+            sport_key
+        )
 
     elif data.startswith("game:"):
-        _, sport_key, event_id = data.split(":", 2)
-        await show_game(query, sport_key, event_id)
+        _, sport_key, event_id = data.split(
+            ":",
+            2
+        )
+
+        await show_game(
+            query,
+            sport_key,
+            event_id
+        )
 
     elif data.startswith("pick:"):
-        pick_id = data.split(":", 1)[1]
-        await ask_amount(query, pick_id)
+        pick_id = data.split(
+            ":",
+            1
+        )[1]
+
+        await ask_amount(
+            query,
+            pick_id
+        )
 
     elif data.startswith("confirm:"):
         await confirm_bet(query)
@@ -646,12 +928,22 @@ def main():
     if not ODDS_API_KEY:
         raise ValueError("Falta ODDS_API_KEY")
 
+    if not DATABASE_URL:
+        raise ValueError("Falta DATABASE_URL")
+
     test_database_connection()
     create_database_tables()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(
+        BOT_TOKEN
+    ).build()
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
+    )
 
     app.add_handler(
         MessageHandler(
@@ -660,9 +952,15 @@ def main():
         )
     )
 
-    app.add_handler(CallbackQueryHandler(button))
+    app.add_handler(
+        CallbackQueryHandler(
+            button
+        )
+    )
 
-    print("Bot iniciado correctamente...")
+    print(
+        "Bot iniciado correctamente..."
+    )
 
     app.run_polling()
 
