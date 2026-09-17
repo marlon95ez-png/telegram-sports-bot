@@ -96,7 +96,21 @@ def create_database_tables():
                     expires_at TIMESTAMPTZ,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-            """)
+            """)conn.execute("""
+    CREATE TABLE IF NOT EXISTS unconfirmed_bets (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        event_name TEXT NOT NULL,
+        sport TEXT NOT NULL,
+        competition TEXT,
+        selection TEXT NOT NULL,
+        odds NUMERIC(10,2) NOT NULL,
+        stake INTEGER,
+        potential_return NUMERIC(10,2),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+""")
 
         conn.commit()
 
