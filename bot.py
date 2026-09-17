@@ -13,6 +13,7 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 balances = {}
 bets = {}
@@ -45,6 +46,20 @@ def get_odds(sport_key):
     response.raise_for_status()
 
     return response.json()
+
+
+def test_database_connection():
+    import psycopg
+
+    if not DATABASE_URL:
+        raise ValueError("Falta DATABASE_URL")
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+
+    print("✅ CONEXIÓN CON NEON CORRECTA:", result)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -201,10 +216,6 @@ async def show_game(query, sport_key, event_id):
                 f"pick:{sport_key}:{event_id}:"
                 f"{name}"
             )
-
-            # Telegram limita callback_data a 64 bytes.
-            # Guardamos la información temporalmente en memoria
-            # usando un identificador corto.
 
             user_id = query.from_user.id
 
@@ -566,15 +577,19 @@ def main():
     if not ODDS_API_KEY:
         raise ValueError("Falta ODDS_API_KEY")
 
+    test_database_connection()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_amount
         )
     )
+
     app.add_handler(CallbackQueryHandler(button))
 
     print("Bot iniciado correctamente...")
