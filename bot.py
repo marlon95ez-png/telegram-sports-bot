@@ -635,74 +635,140 @@ async def confirm_bet(query):
     amount = pick["amount"]
 
     try:
-        balance = get_user_balance(user_id)
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
 
-        if balance is None:
-            await query.edit_message_text(
-                "⚠️ No encontré tu cuenta."
-            )
-            return
+                # 1. Obtener el usuario y bloquear su fila
+                cursor.execute("""
+                    SELECT id, balance
+                    FROM users
+                    WHERE telegram_id = %s
+                    FOR UPDATE
+                """, (user_id,))
+
+                user = cursor.fetchone()
+
+                if not user:
+                    raise ValueError(
+                        "Usuario no encontrado"
+                    )
+
+                db_user_id = user[0]
+                balance = user[1]
+
+                # 2. Verificar saldo dentro de la misma transacción
+                if amount > balance:
+                    await query.edit_message_text(
+                        "⚠️ Ya no tienes saldo suficiente.\n\n"
+                        f"Saldo disponible: "
+                        f"{float(balance):,.0f} créditos."
+                    )
+                    return
+
+                # 3. Calcular nuevo saldo
+                new_balance = balance - amount
+
+                # 4. Actualizar saldo
+                cursor.execute("""
+                    UPDATE users
+                    SET balance = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                """, (
+                    new_balance,
+                    db_user_id
+                ))
+
+                # 5. Registrar apuesta en bets
+                event_name = (
+                    f"{pick['home']} vs "
+                    f"{pick['away']}"
+                )
+
+                cursor.execute("""
+                    INSERT INTO bets (
+                        user_id,
+                        sport,
+                        competition,
+                        event_id,
+                        event_name,
+                        selection,
+                        odds,
+                        stake,
+                        potential_return,
+                        status
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s
+                    )
+                    RETURNING id
+                """, (
+                    db_user_id,
+                    "football",
+                    pick.get("sport_key"),
+                    pick["event_id"],
+                    event_name,
+                    pick["selection"],
+                    pick["odds"],
+                    amount,
+                    pick["potential_return"],
+                    "Pendiente",
+                ))
+
+                bet_id = cursor.fetchone()[0]
+
+                # 6. Registrar movimiento de saldo
+                cursor.execute("""
+                    INSERT INTO transactions (
+                        user_id,
+                        type,
+                        amount,
+                        balance_before,
+                        balance_after
+                    )
+                    VALUES (
+                        %s, %s, %s, %s, %s
+                    )
+                """, (
+                    db_user_id,
+                    "bet",
+                    -amount,
+                    balance,
+                    new_balance,
+                ))
+
+                # El COMMIT ocurre automáticamente al salir
+                # correctamente del bloque "with conn"
+
+        # 7. Solo después del COMMIT eliminamos la apuesta temporal
+        del pending_bets[active_key]
+
+        await query.edit_message_text(
+            "✅ APUESTA REGISTRADA\n\n"
+            f"⚽ {pick['home']} vs {pick['away']}\n\n"
+            f"🎯 Selección: {pick['selection']}\n"
+            f"📈 Cuota: {pick['odds']:.2f}\n"
+            f"💵 Apuesta: {amount:,} créditos\n"
+            f"💰 Posible retorno: "
+            f"{pick['potential_return']:,.0f} créditos\n\n"
+            f"💳 Nuevo saldo: "
+            f"{float(new_balance):,.0f} créditos\n\n"
+            "🎯 La apuesta queda pendiente."
+        )
+
+        print(
+            f"✅ APUESTA GUARDADA EN NEON: "
+            f"bet_id={bet_id}, user_id={db_user_id}"
+        )
 
     except Exception as e:
-        print("ERROR BALANCE:", e)
+        print("ERROR CONFIRM BET:", e)
 
         await query.edit_message_text(
-            "⚠️ No pude consultar tu saldo."
+            "⚠️ No se pudo registrar la apuesta.\n\n"
+            "No se descontaron créditos."
         )
-        return
-
-    if amount > balance:
-        await query.edit_message_text(
-            "⚠️ Ya no tienes saldo suficiente."
-        )
-        return
-
-    new_balance = balance - amount
-
-    try:
-        update_user_balance(
-            user_id,
-            new_balance
-        )
-
-    except Exception as e:
-        print("ERROR UPDATE BALANCE:", e)
-
-        await query.edit_message_text(
-            "⚠️ No pude actualizar tu saldo.\n\n"
-            "La apuesta no fue registrada."
-        )
-        return
-
-    if user_id not in bets:
-        bets[user_id] = []
-
-    bet = {
-        "home": pick["home"],
-        "away": pick["away"],
-        "selection": pick["selection"],
-        "odds": pick["odds"],
-        "amount": amount,
-        "potential_return": pick["potential_return"],
-        "status": "Pendiente",
-    }
-
-    bets[user_id].append(bet)
-
-    del pending_bets[active_key]
-
-    await query.edit_message_text(
-        "✅ APUESTA REGISTRADA\n\n"
-        f"⚽ {pick['home']} vs {pick['away']}\n\n"
-        f"🎯 Selección: {pick['selection']}\n"
-        f"📈 Cuota: {pick['odds']:.2f}\n"
-        f"💵 Apuesta: {amount:,} créditos\n"
-        f"💰 Posible retorno: "
-        f"{pick['potential_return']:,.0f} créditos\n\n"
-        f"💳 Nuevo saldo: "
-        f"{new_balance:,.0f} créditos\n\n"
-        "🎯 La apuesta queda pendiente."
-    )
 
 
 async def cancel_bet(query):
