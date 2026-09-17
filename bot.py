@@ -454,45 +454,13 @@ async def show_game(query, sport_key, event_id):
             )
 
             pending_bets[pick_id] = {
-    "sport_key": sport_key,
-    "event_id": event_id,
-    "home": home,
-    "away": away,
-    "selection": name,
-    "odds": price,
-}
-
-with get_db_connection() as conn:
-    cursor = conn.cursor()
-
-    cursor.execute(
-        "SELECT id FROM users WHERE telegram_id = %s",
-        (query.from_user.id,)
-    )
-
-    user_row = cursor.fetchone()
-
-    if user_row:
-        cursor.execute("""
-            INSERT INTO unconfirmed_bets (
-                user_id,
-                event_id,
-                event_name,
-                sport,
-                competition,
-                selection,
-                odds
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (
-            user_row[0],
-            event_id,
-            f"{home} vs {away}",
-            sport_key,
-            sport_key,
-            name,
-            price,
-        ))
+                "sport_key": sport_key,
+                "event_id": event_id,
+                "home": home,
+                "away": away,
+                "selection": name,
+                "odds": price,
+            }
 
             keyboard.append([
                 InlineKeyboardButton(
@@ -535,6 +503,7 @@ with get_db_connection() as conn:
         await query.edit_message_text(
             "⚠️ No pude obtener las cuotas."
         )
+        
 
 
 async def ask_amount(query, pick_id):
