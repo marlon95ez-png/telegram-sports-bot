@@ -228,6 +228,107 @@ def get_odds(sport_key):
     return response.json()
 
 
+# ==========================================================
+# RESULTADOS DE EVENTOS
+# ==========================================================
+
+def get_event_result(sport_key, event_id):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "daysFrom": 3,
+        "eventIds": event_id,
+        "dateFormat": "iso",
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    games = response.json()
+
+    if not games:
+        return None
+
+    game = games[0]
+
+    if not game.get("completed"):
+        return None
+
+    return {
+        "event_id": game["id"],
+        "sport_key": game.get("sport_key"),
+        "home_team": game.get("home_team"),
+        "away_team": game.get("away_team"),
+        "completed": game.get("completed", False),
+        "scores": game.get("scores") or [],
+    }
+
+
+async def test_result(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Uso correcto:\n\n"
+            "/resultado SPORT_KEY EVENT_ID\n\n"
+            "Ejemplo:\n"
+            "/resultado soccer_epl EVENT_ID"
+        )
+        return
+
+    sport_key = context.args[0]
+    event_id = context.args[1]
+
+    try:
+        result = get_event_result(
+            sport_key,
+            event_id
+        )
+
+        if result is None:
+            await update.message.reply_text(
+                "⏳ No hay resultado final disponible "
+                "para este evento.\n\n"
+                "Puede que el partido todavía no haya terminado "
+                "o que el evento no esté disponible en el historial."
+            )
+            return
+
+        text = (
+            "✅ RESULTADO ENCONTRADO\n\n"
+            f"🏟 {result['home_team']}\n"
+            f"vs\n"
+            f"🏟 {result['away_team']}\n\n"
+            f"Event ID:\n"
+            f"{result['event_id']}\n\n"
+            f"Completed: {result['completed']}\n\n"
+            "📊 Marcador:\n"
+        )
+
+        for score in result["scores"]:
+            text += (
+                f"• {score.get('name')}: "
+                f"{score.get('score')}\n"
+            )
+
+        await update.message.reply_text(text)
+
+    except Exception as e:
+        print("ERROR TEST RESULT:", e)
+
+        await update.message.reply_text(
+            "⚠️ Error consultando el resultado.\n\n"
+            f"{e}"
+        )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telegram_user = update.effective_user
 
@@ -618,7 +719,6 @@ async def handle_amount(
 
                 db_user_id = user[0]
 
-                # El usuario tendrá una sola apuesta sin confirmar activa.
                 cursor.execute("""
                     DELETE FROM unconfirmed_bets
                     WHERE user_id = %s
@@ -758,7 +858,6 @@ async def confirm_bet(query):
                     f"{pick['away']}"
                 )
 
-                # Guardar apuesta confirmada.
                 cursor.execute("""
                     INSERT INTO bets (
                         user_id,
@@ -792,7 +891,6 @@ async def confirm_bet(query):
 
                 bet_id = cursor.fetchone()[0]
 
-                # Descontar saldo.
                 cursor.execute("""
                     UPDATE users
                     SET balance = %s,
@@ -803,7 +901,6 @@ async def confirm_bet(query):
                     db_user_id
                 ))
 
-                # Registrar transacción.
                 cursor.execute("""
                     INSERT INTO transactions (
                         user_id,
@@ -822,10 +919,6 @@ async def confirm_bet(query):
                     balance,
                     new_balance,
                 ))
-
-                # ==================================================
-                # ELIMINAR APUESTA SIN CONFIRMAR
-                # ==================================================
 
                 cursor.execute("""
                     DELETE FROM unconfirmed_bets
@@ -923,7 +1016,6 @@ async def show_bets(query):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-
                 cursor.execute(
                     """
                     SELECT
@@ -1199,6 +1291,17 @@ def main():
         CommandHandler(
             "start",
             start
+        )
+    )
+
+    # ==========================================================
+    # COMANDO TEMPORAL DE PRUEBA DE RESULTADOS
+    # ==========================================================
+
+    app.add_handler(
+        CommandHandler(
+            "resultado",
+            test_result
         )
     )
 
