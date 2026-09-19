@@ -72,6 +72,11 @@ def create_database_tables():
             """)
 
             cursor.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS match_date TIMESTAMPTZ;
+            """)
+
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     id BIGSERIAL PRIMARY KEY,
                     user_id BIGINT NOT NULL REFERENCES users(id),
@@ -115,11 +120,6 @@ def create_database_tables():
                     potential_return NUMERIC(10,2),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
-            """)
-
-            cursor.execute("""
-                ALTER TABLE bets
-                ADD COLUMN IF NOT EXISTS match_date TIMESTAMPTZ;
             """)
 
         conn.commit()
@@ -278,6 +278,91 @@ def get_event_result(sport_key, event_id):
     }
 
 
+# ==========================================================
+# DETERMINAR RESULTADO H2H
+# ==========================================================
+
+def determine_h2h_result(
+    home_team,
+    away_team,
+    scores
+):
+    home_score = None
+    away_score = None
+
+    for score in scores:
+        name = score.get("name")
+        value = score.get("score")
+
+        if name == home_team:
+            home_score = int(value)
+
+        elif name == away_team:
+            away_score = int(value)
+
+    if home_score is None or away_score is None:
+        return None
+
+    if home_score > away_score:
+        return "local"
+
+    if away_score > home_score:
+        return "visitante"
+
+    return "empate"
+
+
+def evaluate_h2h_selection(
+    selection,
+    home_team,
+    away_team,
+    scores
+):
+    result = determine_h2h_result(
+        home_team,
+        away_team,
+        scores
+    )
+
+    if result is None:
+        return None
+
+    selection_normalized = selection.strip().lower()
+
+    home_normalized = home_team.strip().lower()
+    away_normalized = away_team.strip().lower()
+
+    draw_names = {
+        "draw",
+        "empate",
+        "tie",
+    }
+
+    if result == "local":
+        if selection_normalized == home_normalized:
+            return "Ganada"
+
+        return "Perdida"
+
+    if result == "visitante":
+        if selection_normalized == away_normalized:
+            return "Ganada"
+
+        return "Perdida"
+
+    if result == "empate":
+        if selection_normalized in draw_names:
+            return "Ganada"
+
+        return "Perdida"
+
+    return None
+
+
+# ==========================================================
+# COMANDO TEMPORAL - CONSULTAR RESULTADO
+# ==========================================================
+
 async def test_result(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -333,6 +418,107 @@ async def test_result(
 
         await update.message.reply_text(
             "⚠️ Error consultando el resultado.\n\n"
+            f"{e}"
+        )
+
+
+# ==========================================================
+# COMANDO TEMPORAL - EVALUAR APUESTA
+# ==========================================================
+
+async def test_evaluate(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Uso correcto:\n\n"
+            "/evaluar SPORT_KEY EVENT_ID SELECCION\n\n"
+            "Ejemplo:\n"
+            "/evaluar soccer_germany_bundesliga EVENT_ID Bayer Leverkusen"
+        )
+        return
+
+    sport_key = context.args[0]
+    event_id = context.args[1]
+
+    selection = " ".join(
+        context.args[2:]
+    )
+
+    try:
+        result = get_event_result(
+            sport_key,
+            event_id
+        )
+
+        if result is None:
+            await update.message.reply_text(
+                "⏳ No hay resultado final disponible "
+                "para este evento."
+            )
+            return
+
+        game_result = determine_h2h_result(
+            result["home_team"],
+            result["away_team"],
+            result["scores"]
+        )
+
+        bet_result = evaluate_h2h_selection(
+            selection,
+            result["home_team"],
+            result["away_team"],
+            result["scores"]
+        )
+
+        if game_result == "local":
+            winner_text = result["home_team"]
+
+        elif game_result == "visitante":
+            winner_text = result["away_team"]
+
+        elif game_result == "empate":
+            winner_text = "EMPATE"
+
+        else:
+            winner_text = "No determinado"
+
+        text = (
+            "🧪 EVALUACIÓN DE APUESTA\n\n"
+            f"⚽ {result['home_team']}\n"
+            f"vs\n"
+            f"⚽ {result['away_team']}\n\n"
+            "📊 Marcador:\n"
+        )
+
+        for score in result["scores"]:
+            text += (
+                f"• {score.get('name')}: "
+                f"{score.get('score')}\n"
+            )
+
+        text += (
+            "\n🏆 Resultado del partido:\n"
+            f"{winner_text}\n\n"
+            "🎯 Selección evaluada:\n"
+            f"{selection}\n\n"
+            "📌 Resultado de la apuesta:\n"
+            f"{bet_result}\n\n"
+            "ℹ️ Esta prueba NO modifica saldo, "
+            "apuestas ni transacciones."
+        )
+
+        await update.message.reply_text(text)
+
+    except Exception as e:
+        print(
+            "ERROR TEST EVALUATE:",
+            e
+        )
+
+        await update.message.reply_text(
+            "⚠️ Error evaluando la apuesta.\n\n"
             f"{e}"
         )
 
@@ -1341,6 +1527,17 @@ def main():
         CommandHandler(
             "resultado",
             test_result
+        )
+    )
+
+    # ==========================================================
+    # COMANDO TEMPORAL DE EVALUACIÓN
+    # ==========================================================
+
+    app.add_handler(
+        CommandHandler(
+            "evaluar",
+            test_evaluate
         )
     )
 
