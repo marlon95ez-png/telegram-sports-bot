@@ -2187,8 +2187,13 @@ def main():
             test_recent_results
         )
     )
-
-    application.add_handler(CommandHandler("liquidar", test_settle))
+    
+        app.add_handler(
+    CommandHandler(
+        "liquidar",
+        test_settle
+    )
+        )
 
     # ==========================================================
     # COMANDO TEMPORAL - CONSULTAR RESULTADO
