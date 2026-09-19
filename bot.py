@@ -279,6 +279,38 @@ def get_event_result(sport_key, event_id):
 
 
 # ==========================================================
+# BUSCAR PARTIDOS TERMINADOS RECIENTES
+# ==========================================================
+
+def get_recent_completed_events(sport_key):
+    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "daysFrom": 3,
+        "dateFormat": "iso",
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    games = response.json()
+
+    completed_games = []
+
+    for game in games:
+        if game.get("completed"):
+            completed_games.append(game)
+
+    return completed_games
+
+
+# ==========================================================
 # DETERMINAR RESULTADO H2H
 # ==========================================================
 
@@ -360,6 +392,100 @@ def evaluate_h2h_selection(
 
 
 # ==========================================================
+# COMANDO TEMPORAL - BUSCAR PARTIDOS TERMINADOS
+# ==========================================================
+
+async def test_recent_results(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    if len(context.args) != 1:
+        await update.message.reply_text(
+            "Uso correcto:\n\n"
+            "/resultados SPORT_KEY\n\n"
+            "Ejemplo:\n"
+            "/resultados soccer_epl"
+        )
+        return
+
+    sport_key = context.args[0]
+
+    try:
+        games = get_recent_completed_events(
+            sport_key
+        )
+
+        if not games:
+            await update.message.reply_text(
+                "⏳ No encontré partidos terminados "
+                "recientemente para este deporte."
+            )
+            return
+
+        text = "✅ PARTIDOS TERMINADOS\n\n"
+
+        for game in games[:5]:
+
+            home = game.get(
+                "home_team",
+                "N/A"
+            )
+
+            away = game.get(
+                "away_team",
+                "N/A"
+            )
+
+            event_id = game.get(
+                "id",
+                "N/A"
+            )
+
+            scores = game.get(
+                "scores"
+            ) or []
+
+            text += (
+                f"🏟 {home}\n"
+                f"vs\n"
+                f"🏟 {away}\n\n"
+                f"🆔 Event ID:\n"
+                f"{event_id}\n\n"
+                "📊 Marcador:\n"
+            )
+
+            if scores:
+
+                for score in scores:
+                    text += (
+                        f"• {score.get('name')}: "
+                        f"{score.get('score')}\n"
+                    )
+
+            else:
+                text += "• No disponible\n"
+
+            text += (
+                "\n━━━━━━━━━━━━━━\n\n"
+            )
+
+        await update.message.reply_text(
+            text
+        )
+
+    except Exception as e:
+        print(
+            "ERROR RECENT RESULTS:",
+            e
+        )
+
+        await update.message.reply_text(
+            "⚠️ Error consultando partidos terminados.\n\n"
+            f"{e}"
+        )
+
+
+# ==========================================================
 # COMANDO TEMPORAL - CONSULTAR RESULTADO
 # ==========================================================
 
@@ -411,10 +537,15 @@ async def test_result(
                 f"{score.get('score')}\n"
             )
 
-        await update.message.reply_text(text)
+        await update.message.reply_text(
+            text
+        )
 
     except Exception as e:
-        print("ERROR TEST RESULT:", e)
+        print(
+            "ERROR TEST RESULT:",
+            e
+        )
 
         await update.message.reply_text(
             "⚠️ Error consultando el resultado.\n\n"
@@ -509,7 +640,9 @@ async def test_evaluate(
             "apuestas ni transacciones."
         )
 
-        await update.message.reply_text(text)
+        await update.message.reply_text(
+            text
+        )
 
     except Exception as e:
         print(
@@ -523,15 +656,24 @@ async def test_evaluate(
         )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
     telegram_user = update.effective_user
 
     try:
-        user = get_or_create_user(telegram_user)
+        user = get_or_create_user(
+            telegram_user
+        )
+
         balance = user["balance"]
 
     except Exception as e:
-        print("ERROR USER:", e)
+        print(
+            "ERROR USER:",
+            e
+        )
 
         await update.message.reply_text(
             "⚠️ No pude acceder a tu cuenta.\n\n"
@@ -566,9 +708,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 ¡Bienvenido!\n\n"
         "🏆 Sports Bot\n\n"
-        f"💵 Saldo virtual: {balance:,.0f} créditos\n\n"
+        f"💵 Saldo virtual: "
+        f"{balance:,.0f} créditos\n\n"
         "Selecciona una opción:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -588,7 +733,9 @@ async def show_sports(query):
             keyboard.append([
                 InlineKeyboardButton(
                     sport["title"],
-                    callback_data=f"sport:{sport['key']}"
+                    callback_data=(
+                        f"sport:{sport['key']}"
+                    )
                 )
             ])
 
@@ -604,6 +751,7 @@ async def show_sports(query):
                 "⚽ No hay ligas de fútbol "
                 "disponibles en este momento."
             )
+
         else:
             text = (
                 "⚽ FÚTBOL\n\n"
@@ -612,11 +760,16 @@ async def show_sports(query):
 
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
     except Exception as e:
-        print("ERROR SPORTS:", e)
+        print(
+            "ERROR SPORTS:",
+            e
+        )
 
         await query.edit_message_text(
             "⚠️ No pude obtener las competiciones.\n\n"
@@ -624,9 +777,14 @@ async def show_sports(query):
         )
 
 
-async def show_games(query, sport_key):
+async def show_games(
+    query,
+    sport_key
+):
     try:
-        games = get_odds(sport_key)
+        games = get_odds(
+            sport_key
+        )
 
         if not games:
             await query.edit_message_text(
@@ -638,6 +796,7 @@ async def show_games(query, sport_key):
         keyboard = []
 
         for game in games[:15]:
+
             home = game.get(
                 "home_team",
                 "Local"
@@ -668,20 +827,31 @@ async def show_games(query, sport_key):
             "⚽ PARTIDOS\n\n"
             f"Competición: {sport_key}\n\n"
             "Selecciona un partido:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
     except Exception as e:
-        print("ERROR ODDS:", e)
+        print(
+            "ERROR ODDS:",
+            e
+        )
 
         await query.edit_message_text(
             "⚠️ No pude obtener los partidos."
         )
 
 
-async def show_game(query, sport_key, event_id):
+async def show_game(
+    query,
+    sport_key,
+    event_id
+):
     try:
-        games = get_odds(sport_key)
+        games = get_odds(
+            sport_key
+        )
 
         game = next(
             (
@@ -706,16 +876,19 @@ async def show_game(query, sport_key, event_id):
             "bookmakers",
             []
         ):
+
             for market in bookmaker.get(
                 "markets",
                 []
             ):
+
                 if market["key"] == "h2h":
 
                     for outcome in market.get(
                         "outcomes",
                         []
                     ):
+
                         name = outcome["name"]
                         price = outcome["price"]
 
@@ -741,20 +914,26 @@ async def show_game(query, sport_key, event_id):
                 "away": away,
                 "selection": name,
                 "odds": price,
-                "commence_time": game.get("commence_time"),
+                "commence_time": game.get(
+                    "commence_time"
+                ),
             }
 
             keyboard.append([
                 InlineKeyboardButton(
                     f"{name} — {price:.2f}",
-                    callback_data=f"pick:{pick_id}"
+                    callback_data=(
+                        f"pick:{pick_id}"
+                    )
                 )
             ])
 
         keyboard.append([
             InlineKeyboardButton(
                 "⬅️ Partidos",
-                callback_data=f"sport:{sport_key}"
+                callback_data=(
+                    f"sport:{sport_key}"
+                )
             )
         ])
 
@@ -776,21 +955,31 @@ async def show_game(query, sport_key, event_id):
 
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
     except Exception as e:
-        print("ERROR GAME:", e)
+        print(
+            "ERROR GAME:",
+            e
+        )
 
         await query.edit_message_text(
             "⚠️ No pude obtener las cuotas."
         )
 
 
-async def ask_amount(query, pick_id):
+async def ask_amount(
+    query,
+    pick_id
+):
     user_id = query.from_user.id
 
-    pick = pending_bets.get(pick_id)
+    pick = pending_bets.get(
+        pick_id
+    )
 
     if not pick:
         await query.edit_message_text(
@@ -799,7 +988,9 @@ async def ask_amount(query, pick_id):
         return
 
     try:
-        balance = get_user_balance(user_id)
+        balance = get_user_balance(
+            user_id
+        )
 
         if balance is None:
             await query.edit_message_text(
@@ -808,20 +999,29 @@ async def ask_amount(query, pick_id):
             return
 
     except Exception as e:
-        print("ERROR BALANCE:", e)
+        print(
+            "ERROR BALANCE:",
+            e
+        )
 
         await query.edit_message_text(
             "⚠️ No pude consultar tu saldo."
         )
+
         return
 
-    pending_bets[f"active:{user_id}"] = pick
+    pending_bets[
+        f"active:{user_id}"
+    ] = pick
 
     await query.edit_message_text(
         f"🎯 SELECCIÓN\n\n"
-        f"⚽ {pick['home']} vs {pick['away']}\n\n"
-        f"Tu selección: {pick['selection']}\n"
-        f"📈 Cuota: {pick['odds']:.2f}\n\n"
+        f"⚽ {pick['home']} vs "
+        f"{pick['away']}\n\n"
+        f"Tu selección: "
+        f"{pick['selection']}\n"
+        f"📈 Cuota: "
+        f"{pick['odds']:.2f}\n\n"
         f"💰 Saldo disponible: "
         f"{balance:,.0f} créditos\n\n"
         "💵 Escribe ahora el monto "
@@ -836,7 +1036,9 @@ async def handle_amount(
 ):
     user_id = update.effective_user.id
 
-    active_key = f"active:{user_id}"
+    active_key = (
+        f"active:{user_id}"
+    )
 
     if active_key not in pending_bets:
         return
@@ -854,7 +1056,9 @@ async def handle_amount(
         return
 
     try:
-        balance = get_user_balance(user_id)
+        balance = get_user_balance(
+            user_id
+        )
 
         if balance is None:
             await update.message.reply_text(
@@ -863,11 +1067,15 @@ async def handle_amount(
             return
 
     except Exception as e:
-        print("ERROR BALANCE:", e)
+        print(
+            "ERROR BALANCE:",
+            e
+        )
 
         await update.message.reply_text(
             "⚠️ No pude consultar tu saldo."
         )
+
         return
 
     if amount <= 0:
@@ -884,12 +1092,18 @@ async def handle_amount(
         )
         return
 
-    pick = pending_bets[active_key]
+    pick = pending_bets[
+        active_key
+    ]
 
-    potential_return = amount * pick["odds"]
+    potential_return = (
+        amount * pick["odds"]
+    )
 
     pick["amount"] = amount
-    pick["potential_return"] = potential_return
+    pick["potential_return"] = (
+        potential_return
+    )
 
     # ==========================================================
     # GUARDAR APUESTA SIN CONFIRMAR EN NEON
@@ -953,12 +1167,17 @@ async def handle_amount(
                     potential_return,
                 ))
 
-                unconfirmed_id = cursor.fetchone()[0]
+                unconfirmed_id = (
+                    cursor.fetchone()[0]
+                )
 
-        pick["unconfirmed_id"] = unconfirmed_id
+        pick["unconfirmed_id"] = (
+            unconfirmed_id
+        )
 
         print(
-            "✅ APUESTA SIN CONFIRMAR GUARDADA EN NEON: "
+            "✅ APUESTA SIN CONFIRMAR "
+            "GUARDADA EN NEON: "
             f"id={unconfirmed_id}, "
             f"user_id={db_user_id}"
         )
@@ -970,7 +1189,8 @@ async def handle_amount(
         )
 
         await update.message.reply_text(
-            "⚠️ No se pudo guardar la apuesta sin confirmar.\n\n"
+            "⚠️ No se pudo guardar "
+            "la apuesta sin confirmar.\n\n"
             "Inténtalo nuevamente."
         )
 
@@ -980,34 +1200,48 @@ async def handle_amount(
         [
             InlineKeyboardButton(
                 "✅ Confirmar",
-                callback_data=f"confirm:{user_id}"
+                callback_data=(
+                    f"confirm:{user_id}"
+                )
             ),
             InlineKeyboardButton(
                 "❌ Cancelar",
-                callback_data=f"cancel:{user_id}"
+                callback_data=(
+                    f"cancel:{user_id}"
+                )
             ),
         ]
     ]
 
     await update.message.reply_text(
         "🎯 CONFIRMAR APUESTA\n\n"
-        f"⚽ {pick['home']} vs {pick['away']}\n\n"
-        f"🎯 Selección: {pick['selection']}\n"
-        f"📈 Cuota: {pick['odds']:.2f}\n"
-        f"💵 Apuesta: {amount:,} créditos\n"
+        f"⚽ {pick['home']} vs "
+        f"{pick['away']}\n\n"
+        f"🎯 Selección: "
+        f"{pick['selection']}\n"
+        f"📈 Cuota: "
+        f"{pick['odds']:.2f}\n"
+        f"💵 Apuesta: "
+        f"{amount:,} créditos\n"
         f"💰 Posible retorno: "
         f"{potential_return:,.0f} créditos\n\n"
         "¿Confirmar apuesta?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
 async def confirm_bet(query):
     user_id = query.from_user.id
 
-    active_key = f"active:{user_id}"
+    active_key = (
+        f"active:{user_id}"
+    )
 
-    pick = pending_bets.get(active_key)
+    pick = pending_bets.get(
+        active_key
+    )
 
     if not pick:
         await query.edit_message_text(
@@ -1046,7 +1280,9 @@ async def confirm_bet(query):
                     )
                     return
 
-                new_balance = balance - amount
+                new_balance = (
+                    balance - amount
+                )
 
                 event_name = (
                     f"{pick['home']} vs "
@@ -1126,14 +1362,20 @@ async def confirm_bet(query):
                     db_user_id
                 ))
 
-        del pending_bets[active_key]
+        del pending_bets[
+            active_key
+        ]
 
         await query.edit_message_text(
             "✅ APUESTA REGISTRADA\n\n"
-            f"⚽ {pick['home']} vs {pick['away']}\n\n"
-            f"🎯 Selección: {pick['selection']}\n"
-            f"📈 Cuota: {pick['odds']:.2f}\n"
-            f"💵 Apuesta: {amount:,} créditos\n"
+            f"⚽ {pick['home']} vs "
+            f"{pick['away']}\n\n"
+            f"🎯 Selección: "
+            f"{pick['selection']}\n"
+            f"📈 Cuota: "
+            f"{pick['odds']:.2f}\n"
+            f"💵 Apuesta: "
+            f"{amount:,} créditos\n"
             f"💰 Posible retorno: "
             f"{pick['potential_return']:,.0f} créditos\n\n"
             f"💳 Nuevo saldo: "
@@ -1154,7 +1396,8 @@ async def confirm_bet(query):
         )
 
         await query.edit_message_text(
-            "⚠️ No se pudo registrar la apuesta.\n\n"
+            "⚠️ No se pudo registrar "
+            "la apuesta.\n\n"
             "No se descontaron créditos."
         )
 
@@ -1162,7 +1405,9 @@ async def confirm_bet(query):
 async def cancel_bet(query):
     user_id = query.from_user.id
 
-    active_key = f"active:{user_id}"
+    active_key = (
+        f"active:{user_id}"
+    )
 
     try:
         with get_db_connection() as conn:
@@ -1178,7 +1423,9 @@ async def cancel_bet(query):
                 """, (user_id,))
 
         if active_key in pending_bets:
-            del pending_bets[active_key]
+            del pending_bets[
+                active_key
+            ]
 
     except Exception as e:
         print(
@@ -1213,6 +1460,7 @@ async def show_bets(query):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+
                 cursor.execute(
                     """
                     SELECT
@@ -1238,7 +1486,8 @@ async def show_bets(query):
         if not user_bets:
             await query.edit_message_text(
                 "🎯 MIS APUESTAS\n\n"
-                "Todavía no tienes apuestas registradas.",
+                "Todavía no tienes "
+                "apuestas registradas.",
                 reply_markup=InlineKeyboardMarkup([
                     [
                         InlineKeyboardButton(
@@ -1250,12 +1499,15 @@ async def show_bets(query):
             )
             return
 
-        text = "🎯 MIS APUESTAS\n\n"
+        text = (
+            "🎯 MIS APUESTAS\n\n"
+        )
 
         for i, bet in enumerate(
             user_bets,
             1
         ):
+
             (
                 event_name,
                 selection,
@@ -1266,32 +1518,58 @@ async def show_bets(query):
             ) = bet
 
             if match_date:
-                if isinstance(match_date, str):
+
+                if isinstance(
+                    match_date,
+                    str
+                ):
+
                     try:
-                        match_date = datetime.fromisoformat(
-                            match_date.replace("Z", "+00:00")
+                        match_date = (
+                            datetime.fromisoformat(
+                                match_date.replace(
+                                    "Z",
+                                    "+00:00"
+                                )
+                            )
                         )
+
                     except Exception:
                         pass
 
-                if isinstance(match_date, datetime):
-                    match_date_text = match_date.strftime(
-                        "%d/%m/%Y %H:%M UTC"
+                if isinstance(
+                    match_date,
+                    datetime
+                ):
+
+                    match_date_text = (
+                        match_date.strftime(
+                            "%d/%m/%Y %H:%M UTC"
+                        )
                     )
+
                 else:
-                    match_date_text = str(match_date)
+                    match_date_text = (
+                        str(match_date)
+                    )
 
             else:
-                match_date_text = "No disponible"
+                match_date_text = (
+                    "No disponible"
+                )
 
             text += (
                 f"#{i}\n"
                 f"⚽ {event_name}\n"
                 f"🎯 {selection}\n"
-                f"📅 Partido: {match_date_text}\n"
-                f"📈 Cuota: {odds:.2f}\n"
-                f"💵 Apuesta: {stake:,}\n"
-                f"📌 Estado: {status}\n\n"
+                f"📅 Partido: "
+                f"{match_date_text}\n"
+                f"📈 Cuota: "
+                f"{odds:.2f}\n"
+                f"💵 Apuesta: "
+                f"{stake:,}\n"
+                f"📌 Estado: "
+                f"{status}\n\n"
             )
 
         await query.edit_message_text(
@@ -1313,7 +1591,8 @@ async def show_bets(query):
         )
 
         await query.edit_message_text(
-            "❌ No se pudieron cargar tus apuestas.",
+            "❌ No se pudieron cargar "
+            "tus apuestas.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -1362,7 +1641,9 @@ async def button(
 
     if data == "football":
 
-        await show_sports(query)
+        await show_sports(
+            query
+        )
 
     elif data == "baseball":
 
@@ -1376,7 +1657,9 @@ async def button(
         user_id = query.from_user.id
 
         try:
-            balance = get_user_balance(user_id)
+            balance = get_user_balance(
+                user_id
+            )
 
             if balance is None:
                 await query.edit_message_text(
@@ -1385,6 +1668,7 @@ async def button(
                 return
 
         except Exception as e:
+
             print(
                 "ERROR BALANCE:",
                 e
@@ -1413,19 +1697,24 @@ async def button(
 
     elif data == "bets":
 
-        await show_bets(query)
+        await show_bets(
+            query
+        )
 
     elif data == "home":
 
         user_id = query.from_user.id
 
         try:
-            balance = get_user_balance(user_id)
+            balance = get_user_balance(
+                user_id
+            )
 
             if balance is None:
                 balance = 1000
 
         except Exception as e:
+
             print(
                 "ERROR BALANCE:",
                 e
@@ -1480,11 +1769,15 @@ async def button(
 
     elif data.startswith("confirm:"):
 
-        await confirm_bet(query)
+        await confirm_bet(
+            query
+        )
 
     elif data.startswith("cancel:"):
 
-        await cancel_bet(query)
+        await cancel_bet(
+            query
+        )
 
 
 def main():
@@ -1520,7 +1813,18 @@ def main():
     )
 
     # ==========================================================
-    # COMANDO TEMPORAL DE PRUEBA DE RESULTADOS
+    # COMANDO TEMPORAL - BUSCAR PARTIDOS TERMINADOS
+    # ==========================================================
+
+    app.add_handler(
+        CommandHandler(
+            "resultados",
+            test_recent_results
+        )
+    )
+
+    # ==========================================================
+    # COMANDO TEMPORAL - CONSULTAR RESULTADO
     # ==========================================================
 
     app.add_handler(
@@ -1531,7 +1835,7 @@ def main():
     )
 
     # ==========================================================
-    # COMANDO TEMPORAL DE EVALUACIÓN
+    # COMANDO TEMPORAL - EVALUAR APUESTA
     # ==========================================================
 
     app.add_handler(
