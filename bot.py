@@ -2,6 +2,8 @@ import os
 import requests
 import psycopg
 
+from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -59,6 +61,7 @@ def create_database_tables():
                     competition TEXT,
                     event_id TEXT NOT NULL,
                     event_name TEXT,
+                    match_date TIMESTAMPTZ,
                     selection TEXT NOT NULL,
                     odds NUMERIC(10,4) NOT NULL,
                     stake NUMERIC(18,2) NOT NULL,
@@ -112,6 +115,11 @@ def create_database_tables():
                     potential_return NUMERIC(10,2),
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+            """)
+
+            cursor.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS match_date TIMESTAMPTZ;
             """)
 
         conn.commit()
@@ -547,6 +555,7 @@ async def show_game(query, sport_key, event_id):
                 "away": away,
                 "selection": name,
                 "odds": price,
+                "commence_time": game.get("commence_time"),
             }
 
             keyboard.append([
@@ -865,6 +874,7 @@ async def confirm_bet(query):
                         competition,
                         event_id,
                         event_name,
+                        match_date,
                         selection,
                         odds,
                         stake,
@@ -872,7 +882,7 @@ async def confirm_bet(query):
                         status
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s
                     )
                     RETURNING id
@@ -882,6 +892,7 @@ async def confirm_bet(query):
                     pick.get("sport_key"),
                     pick["event_id"],
                     event_name,
+                    pick.get("commence_time"),
                     pick["selection"],
                     pick["odds"],
                     amount,
@@ -1023,7 +1034,8 @@ async def show_bets(query):
                         selection,
                         odds,
                         stake,
-                        status
+                        status,
+                        match_date
                     FROM bets
                     WHERE user_id = (
                         SELECT id
@@ -1058,12 +1070,39 @@ async def show_bets(query):
             user_bets,
             1
         ):
-            event_name, selection, odds, stake, status = bet
+            (
+                event_name,
+                selection,
+                odds,
+                stake,
+                status,
+                match_date
+            ) = bet
+
+            if match_date:
+                if isinstance(match_date, str):
+                    try:
+                        match_date = datetime.fromisoformat(
+                            match_date.replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        pass
+
+                if isinstance(match_date, datetime):
+                    match_date_text = match_date.strftime(
+                        "%d/%m/%Y %H:%M UTC"
+                    )
+                else:
+                    match_date_text = str(match_date)
+
+            else:
+                match_date_text = "No disponible"
 
             text += (
                 f"#{i}\n"
                 f"⚽ {event_name}\n"
                 f"🎯 {selection}\n"
+                f"📅 Partido: {match_date_text}\n"
                 f"📈 Cuota: {odds:.2f}\n"
                 f"💵 Apuesta: {stake:,}\n"
                 f"📌 Estado: {status}\n\n"
