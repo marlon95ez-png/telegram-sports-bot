@@ -390,6 +390,371 @@ def evaluate_h2h_selection(
 
     return None
 
+async def settle_bet(bet_id):
+    """
+    Liquida una apuesta individual de forma atómica.
+
+    - Solo procesa apuestas con status = 'Pendiente'
+    - Consulta el resultado real de The Odds API
+    - Marca la apuesta como Ganada o Perdida
+    - Si gana, acredita potential_return
+    - Registra la transacción
+    - Evita pagos duplicados
+    """
+
+    conn = None
+
+    try:
+        conn = psycopg.connect(DATABASE_URL)
+
+        with conn.cursor() as cur:
+
+            # 1. Bloquear la apuesta para evitar doble liquidación
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    event_id,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    status
+                FROM bets
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (bet_id,)
+            )
+
+            bet = cur.fetchone()
+
+            if not bet:
+                conn.rollback()
+                return {
+                    "success": False,
+                    "message": "Apuesta no encontrada."
+                }
+
+            (
+                db_bet_id,
+                user_id,
+                sport_key,
+                event_id,
+                selection,
+                odds,
+                stake,
+                potential_return,
+                status
+            ) = bet
+
+            # 2. Protección contra doble liquidación
+            if status != "Pendiente":
+                conn.rollback()
+
+                return {
+                    "success": False,
+                    "message": (
+                        f"La apuesta ya fue procesada.\n"
+                        f"Estado actual: {status}"
+                    )
+                }
+
+            # 3. Obtener resultado real
+            result = get_event_result(sport_key, event_id)
+
+            if not result:
+                conn.rollback()
+
+                return {
+                    "success": False,
+                    "message": (
+                        "El partido todavía no tiene un resultado "
+                        "final disponible."
+                    )
+                }
+
+            home_team = result["home_team"]
+            away_team = result["away_team"]
+            scores = result["scores"]
+
+            # 4. Evaluar la selección
+            evaluation = evaluate_h2h_selection(
+                selection,
+                home_team,
+                away_team,
+                scores
+            )
+
+            if evaluation is None:
+                conn.rollback()
+
+                return {
+                    "success": False,
+                    "message": (
+                        "No se pudo determinar el resultado "
+                        "de la apuesta."
+                    )
+                }
+
+            # -------------------------------------------------
+            # APUESTA PERDIDA
+            # -------------------------------------------------
+            if evaluation == "Perdida":
+
+                cur.execute(
+                    """
+                    UPDATE bets
+                    SET status = 'Perdida'
+                    WHERE id = %s
+                      AND status = 'Pendiente'
+                    """,
+                    (db_bet_id,)
+                )
+
+                # Registramos el resultado de la apuesta.
+                # amount = 0 porque no hay devolución.
+                cur.execute(
+                    """
+                    SELECT balance
+                    FROM users
+                    WHERE id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id,)
+                )
+
+                user_row = cur.fetchone()
+
+                if not user_row:
+                    raise Exception("Usuario no encontrado.")
+
+                balance_before = user_row[0]
+                balance_after = balance_before
+
+                cur.execute(
+                    """
+                    INSERT INTO transactions
+                    (
+                        user_id,
+                        type,
+                        amount,
+                        balance_before,
+                        balance_after
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user_id,
+                        "bet_loss",
+                        0,
+                        balance_before,
+                        balance_after
+                    )
+                )
+
+                conn.commit()
+
+                return {
+                    "success": True,
+                    "status": "Perdida",
+                    "balance": balance_after,
+                    "potential_return": 0,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "scores": scores
+                }
+
+            # -------------------------------------------------
+            # APUESTA GANADA
+            # -------------------------------------------------
+            if evaluation == "Ganada":
+
+                # Bloquear usuario antes de modificar saldo
+                cur.execute(
+                    """
+                    SELECT balance
+                    FROM users
+                    WHERE id = %s
+                    FOR UPDATE
+                    """,
+                    (user_id,)
+                )
+
+                user_row = cur.fetchone()
+
+                if not user_row:
+                    raise Exception("Usuario no encontrado.")
+
+                balance_before = user_row[0]
+
+                # El retorno total incluye stake + ganancia
+                payout = potential_return
+
+                balance_after = balance_before + payout
+
+                # Actualizar saldo
+                cur.execute(
+                    """
+                    UPDATE users
+                    SET
+                        balance = %s,
+                        updated_at = NOW()
+                    WHERE id = %s
+                    """,
+                    (
+                        balance_after,
+                        user_id
+                    )
+                )
+
+                # Marcar apuesta como ganada
+                cur.execute(
+                    """
+                    UPDATE bets
+                    SET status = 'Ganada'
+                    WHERE id = %s
+                      AND status = 'Pendiente'
+                    """,
+                    (db_bet_id,)
+                )
+
+                # Registrar pago
+                cur.execute(
+                    """
+                    INSERT INTO transactions
+                    (
+                        user_id,
+                        type,
+                        amount,
+                        balance_before,
+                        balance_after
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    """,
+                    (
+                        user_id,
+                        "bet_win",
+                        payout,
+                        balance_before,
+                        balance_after
+                    )
+                )
+
+                conn.commit()
+
+                return {
+                    "success": True,
+                    "status": "Ganada",
+                    "balance": balance_after,
+                    "potential_return": payout,
+                    "home_team": home_team,
+                    "away_team": away_team,
+                    "scores": scores
+                }
+
+        return {
+            "success": False,
+            "message": "Resultado de liquidación desconocido."
+        }
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        print(f"ERROR LIQUIDANDO APUESTA {bet_id}: {e}")
+
+        return {
+            "success": False,
+            "message": f"Error interno al liquidar la apuesta: {e}"
+        }
+
+    finally:
+
+        if conn:
+            conn.close()
+
+async def test_settle(update, context):
+    """
+    Comando temporal para probar la liquidación de una apuesta.
+
+    Uso:
+    /liquidar ID_APUESTA
+    """
+
+    if not context.args:
+        await update.message.reply_text(
+            "Uso:\n"
+            "/liquidar ID_APUESTA"
+        )
+        return
+
+    try:
+        bet_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text(
+            "❌ El ID de la apuesta debe ser un número."
+        )
+        return
+
+    await update.message.reply_text(
+        f"⏳ Liquidando apuesta #{bet_id}..."
+    )
+
+    result = await settle_bet(bet_id)
+
+    if not result["success"]:
+        await update.message.reply_text(
+            f"❌ NO SE LIQUIDÓ\n\n"
+            f"{result['message']}"
+        )
+        return
+
+    home_team = result["home_team"]
+    away_team = result["away_team"]
+    scores = result["scores"]
+
+    score_text = ""
+
+    for score in scores:
+        score_text += (
+            f"• {score.get('name')}: "
+            f"{score.get('score')}\n"
+        )
+
+    status = result["status"]
+
+    if status == "Ganada":
+        await update.message.reply_text(
+            f"✅ APUESTA LIQUIDADA\n\n"
+            f"⚽ {home_team}\n"
+            f"vs\n"
+            f"⚽ {away_team}\n\n"
+            f"📊 Marcador:\n"
+            f"{score_text}\n"
+            f"🏆 Resultado: Ganada\n\n"
+            f"💰 Premio acreditado: "
+            f"{result['potential_return']}\n"
+            f"💳 Nuevo saldo: "
+            f"{result['balance']}"
+        )
+
+    else:
+        await update.message.reply_text(
+            f"🔴 APUESTA LIQUIDADA\n\n"
+            f"⚽ {home_team}\n"
+            f"vs\n"
+            f"⚽ {away_team}\n\n"
+            f"📊 Marcador:\n"
+            f"{score_text}\n"
+            f"🏆 Resultado: Perdida\n\n"
+            f"💳 Saldo: "
+            f"{result['balance']}"
+        )
+
 
 # ==========================================================
 # COMANDO TEMPORAL - BUSCAR PARTIDOS TERMINADOS
@@ -1822,6 +2187,8 @@ def main():
             test_recent_results
         )
     )
+
+    application.add_handler(CommandHandler("liquidar", test_settle))
 
     # ==========================================================
     # COMANDO TEMPORAL - CONSULTAR RESULTADO
