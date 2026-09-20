@@ -1084,23 +1084,21 @@ async def start(
 
 async def show_sports(query):
     try:
-        sports = get_sports()
-
-        football = [
-            s for s in sports
-            if s.get("group") == "Soccer"
-            and s.get("active")
+        leagues = [
+            ("🇪🇸 España - LaLiga", "soccer_spain_la_liga"),
+            ("🏴󠁧󠁢󠁥󠁮󠁧󠁿 Inglaterra - Premier League", "soccer_epl"),
+            ("🇮🇹 Italia - Serie A", "soccer_italy_serie_a"),
+            ("🇩🇪 Alemania - Bundesliga", "soccer_germany_bundesliga"),
+            ("🇫🇷 Francia - Ligue 1", "soccer_france_ligue_one"),
         ]
 
         keyboard = []
 
-        for sport in football[:20]:
+        for title, sport_key in leagues:
             keyboard.append([
                 InlineKeyboardButton(
-                    sport["title"],
-                    callback_data=(
-                        f"sport:{sport['key']}"
-                    )
+                    title,
+                    callback_data=f"sport:{sport_key}"
                 )
             ])
 
@@ -1111,34 +1109,21 @@ async def show_sports(query):
             )
         ])
 
-        if not football:
-            text = (
-                "⚽ No hay ligas de fútbol "
-                "disponibles en este momento."
-            )
-
-        else:
-            text = (
-                "⚽ FÚTBOL\n\n"
-                "Selecciona una competición:"
-            )
+        text = (
+            "⚽ FÚTBOL\n\n"
+            "Selecciona una competición:"
+        )
 
         await query.edit_message_text(
             text,
-            reply_markup=InlineKeyboardMarkup(
-                keyboard
-            ),
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
     except Exception as e:
-        print(
-            "ERROR SPORTS:",
-            e
-        )
+        print(f"Error mostrando ligas: {e}")
 
         await query.edit_message_text(
-            "⚠️ No pude obtener las competiciones.\n\n"
-            "Inténtalo nuevamente."
+            "❌ No se pudieron cargar las ligas."
         )
 
 
