@@ -415,7 +415,7 @@ async def settle_bet(bet_id):
                 SELECT
                     id,
                     user_id,
-                    sport,
+                    competition,
                     event_id,
                     selection,
                     odds,
