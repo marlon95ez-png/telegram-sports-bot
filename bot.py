@@ -235,6 +235,35 @@ def get_odds(sport_key):
     return response.json()
 
 
+def get_event_odds(sport_key, event_id):
+    """
+    Obtiene las cuotas directamente del endpoint específico
+    del evento.
+
+    Esto evita depender del evento almacenado en memoria.
+    """
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/"
+        f"{sport_key}/events/{event_id}/odds"
+    )
+
+    response = requests.get(
+        url,
+        params={
+            "apiKey": ODDS_API_KEY,
+            "regions": "us",
+            "markets": "h2h",
+            "oddsFormat": "decimal",
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
 # ============================================================
 # RESULTADOS
 # ============================================================
@@ -557,7 +586,7 @@ def settle_bet(bet_id):
 
 
 # ============================================================
-# COMANDO DE PRUEBA /LIQUIDAR
+# COMANDO /LIQUIDAR
 # SOLO ADMIN
 # ============================================================
 
@@ -995,6 +1024,43 @@ async def show_games(query, sport_key):
 
         events = get_odds(sport_key)
 
+    except requests.exceptions.HTTPError as e:
+
+        response = getattr(e, "response", None)
+
+        if response is not None:
+            try:
+                error_data = response.json()
+                error_message = error_data.get(
+                    "message",
+                    response.text,
+                )
+            except Exception:
+                error_message = response.text
+
+            text = (
+                "❌ Error de The Odds API\n\n"
+                f"{error_message}"
+            )
+        else:
+            text = f"❌ Error obteniendo partidos:\n{e}"
+
+        await query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data="football",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
     except Exception as e:
 
         await query.edit_message_text(
@@ -1040,10 +1106,9 @@ async def show_games(query, sport_key):
         home = event.get("home_team", "")
         away = event.get("away_team", "")
 
-        # Guardamos temporalmente el evento completo.
-        # Así no necesitamos volver a consultar The Odds API
-        # cuando el usuario seleccione el partido.
-        pending_bets[f"event:{sport_key}:{event_id}"] = event
+        pending_bets[
+            f"event:{sport_key}:{event_id}"
+        ] = event
 
         keyboard.append(
             [
@@ -1079,58 +1144,100 @@ async def show_game(
     event_id,
 ):
 
-    # Recuperamos el evento que ya cargamos en show_games()
-    event = pending_bets.get(
-        f"event:{sport_key}:{event_id}"
-    )
+    try:
 
-    if not event:
+        # ----------------------------------------------------
+        # IMPORTANTE:
+        # Consultamos las cuotas directamente para este evento.
+        # ----------------------------------------------------
+
+        event = get_event_odds(
+            sport_key,
+            event_id,
+        )
+
+    except requests.exceptions.HTTPError as e:
+
+        response = getattr(e, "response", None)
+
+        if response is not None:
+
+            try:
+                error_data = response.json()
+
+                error_message = error_data.get(
+                    "message",
+                    response.text,
+                )
+
+            except Exception:
+
+                error_message = response.text
+
+            text = (
+                "❌ No se pudieron obtener las cuotas.\n\n"
+                f"The Odds API respondió:\n"
+                f"{error_message}"
+            )
+
+        else:
+
+            text = (
+                "❌ No se pudieron obtener las cuotas.\n\n"
+                f"{e}"
+            )
 
         await query.edit_message_text(
-            "❌ Este partido ya no está disponible.\n\n"
-            "Vuelve a la lista de partidos y selecciónalo nuevamente.",
+            text,
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "⬅️ Ver partidos",
+                            "🔄 Intentar nuevamente",
+                            callback_data=f"game:{sport_key}:{event_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
                             callback_data=f"league:{sport_key}",
                         )
-                    ]
+                    ],
                 ]
             ),
         )
 
         return
 
-    home = event.get("home_team")
-    away = event.get("away_team")
-
-    outcomes = {}
-
-    for bookmaker in event.get("bookmakers", []):
-
-        for market in bookmaker.get("markets", []):
-
-            if market.get("key") != "h2h":
-                continue
-
-            for outcome in market.get("outcomes", []):
-
-                name = outcome.get("name")
-                price = outcome.get("price")
-
-                if name not in outcomes:
-
-                    outcomes[name] = price
-
-    if not outcomes:
+    except Exception as e:
 
         await query.edit_message_text(
-            f"⚽ {home}\n"
-            f"vs\n"
-            f"⚽ {away}\n\n"
-            "❌ No hay cuotas disponibles para este partido.",
+            f"❌ Error obteniendo cuotas:\n{e}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Intentar nuevamente",
+                            callback_data=f"game:{sport_key}:{event_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data=f"league:{sport_key}",
+                        )
+                    ],
+                ]
+            ),
+        )
+
+        return
+
+    if not event:
+
+        await query.edit_message_text(
+            "❌ The Odds API no devolvió información "
+            "para este partido.",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -1145,14 +1252,98 @@ async def show_game(
 
         return
 
+    home = event.get("home_team", "Local")
+    away = event.get("away_team", "Visitante")
+
+    outcomes = {}
+
+    # --------------------------------------------------------
+    # RECORRER TODAS LAS CASAS Y TOMAR LA MAYOR CUOTA
+    # --------------------------------------------------------
+
+    for bookmaker in event.get("bookmakers", []):
+
+        for market in bookmaker.get("markets", []):
+
+            if market.get("key") != "h2h":
+                continue
+
+            for outcome in market.get("outcomes", []):
+
+                name = outcome.get("name")
+                price = outcome.get("price")
+
+                if name is None or price is None:
+                    continue
+
+                try:
+                    price = float(price)
+                except (TypeError, ValueError):
+                    continue
+
+                # Conservamos la mayor cuota disponible
+                # para cada selección.
+                if (
+                    name not in outcomes
+                    or price > outcomes[name]
+                ):
+                    outcomes[name] = price
+
+    # --------------------------------------------------------
+    # NO HAY CUOTAS
+    # --------------------------------------------------------
+
+    if not outcomes:
+
+        bookmakers_count = len(
+            event.get("bookmakers", [])
+        )
+
+        await query.edit_message_text(
+            f"⚽ {home}\n"
+            f"vs\n"
+            f"⚽ {away}\n\n"
+            "❌ No hay cuotas h2h disponibles "
+            "para este partido.\n\n"
+            f"📚 Casas encontradas: {bookmakers_count}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "🔄 Actualizar cuotas",
+                            callback_data=f"game:{sport_key}:{event_id}",
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data=f"league:{sport_key}",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CREAR BOTONES
+    # --------------------------------------------------------
+
     keyboard = []
+
+    selection_index = 0
 
     for name, price in outcomes.items():
 
+        # Usamos un callback corto.
+        #
+        # NO ponemos el nombre del equipo en callback_data
+        # porque Telegram tiene un límite de 64 bytes.
         pick_id = (
             f"pick:{sport_key}:"
             f"{event_id}:"
-            f"{name}"
+            f"{selection_index}"
         )
 
         pending_bets[pick_id] = {
@@ -1167,11 +1358,26 @@ async def show_game(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"{name} — {price}",
+                    f"{name} — {price:.2f}",
                     callback_data=pick_id,
                 )
             ]
         )
+
+        selection_index += 1
+
+    # --------------------------------------------------------
+    # ACTUALIZAR / VOLVER
+    # --------------------------------------------------------
+
+    keyboard.append(
+        [
+            InlineKeyboardButton(
+                "🔄 Actualizar cuotas",
+                callback_data=f"game:{sport_key}:{event_id}",
+            )
+        ]
+    )
 
     keyboard.append(
         [
@@ -1186,6 +1392,7 @@ async def show_game(
         f"⚽ {home}\n"
         f"vs\n"
         f"⚽ {away}\n\n"
+        "📈 CUOTAS DISPONIBLES\n\n"
         "Selecciona tu apuesta:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
@@ -1204,7 +1411,8 @@ async def ask_amount(query, pick_id):
     if not pick:
 
         await query.edit_message_text(
-            "❌ Esta selección ya no está disponible."
+            "❌ Esta selección ya no está disponible.\n\n"
+            "Vuelve a seleccionar el partido."
         )
 
         return
@@ -1218,7 +1426,7 @@ async def ask_amount(query, pick_id):
         f"vs\n"
         f"⚽ {pick['away']}\n\n"
         f"🎯 Selección: {pick['selection']}\n"
-        f"📈 Cuota: {pick['odds']}\n\n"
+        f"📈 Cuota: {float(pick['odds']):.2f}\n\n"
         f"💰 Saldo disponible: {balance}\n\n"
         "Escribe el monto que deseas apostar:"
     )
@@ -1359,7 +1567,7 @@ async def handle_amount(
         f"vs\n"
         f"⚽ {active['away']}\n\n"
         f"🎯 Selección: {active['selection']}\n"
-        f"📈 Cuota: {active['odds']}\n"
+        f"📈 Cuota: {float(active['odds']):.2f}\n"
         f"💰 Apuesta: {stake}\n"
         f"🏆 Posible retorno: {potential_return:.2f}\n\n"
         "¿Deseas confirmar?",
@@ -1550,9 +1758,9 @@ async def confirm_bet(
         f"🎟 Apuesta #{bet_id}\n\n"
         f"⚽ {event_name}\n\n"
         f"🎯 Selección: {selection}\n"
-        f"📈 Cuota: {odds}\n"
+        f"📈 Cuota: {float(odds):.2f}\n"
         f"💰 Apostado: {stake}\n"
-        f"🏆 Posible retorno: {potential_return:.2f}\n\n"
+        f"🏆 Posible retorno: {float(potential_return):.2f}\n\n"
         f"💳 Saldo restante: {balance_after}"
     )
 
@@ -2411,7 +2619,10 @@ def main():
         .build()
     )
 
-    # Comandos
+    # --------------------------------------------------------
+    # COMANDOS
+    # --------------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -2447,14 +2658,20 @@ def main():
         )
     )
 
-    # Botones
+    # --------------------------------------------------------
+    # BOTONES
+    # --------------------------------------------------------
+
     application.add_handler(
         CallbackQueryHandler(
             button
         )
     )
 
-    # Mensajes de texto
+    # --------------------------------------------------------
+    # MENSAJES DE TEXTO
+    # --------------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -2463,7 +2680,9 @@ def main():
         )
     )
 
-    print("🏆 Cuba Sports iniciado correctamente.")
+    print(
+        "🏆 Cuba Sports iniciado correctamente."
+    )
 
     application.run_polling()
 
