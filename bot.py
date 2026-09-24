@@ -1040,6 +1040,11 @@ async def show_games(query, sport_key):
         home = event.get("home_team", "")
         away = event.get("away_team", "")
 
+        # Guardamos temporalmente el evento completo.
+        # Así no necesitamos volver a consultar The Odds API
+        # cuando el usuario seleccione el partido.
+        pending_bets[f"event:{sport_key}:{event_id}"] = event
+
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -1074,31 +1079,26 @@ async def show_game(
     event_id,
 ):
 
-    try:
-
-        events = get_odds(sport_key)
-
-    except Exception as e:
-
-        await query.edit_message_text(
-            f"❌ Error:\n{e}"
-        )
-
-        return
-
-    event = None
-
-    for item in events:
-
-        if item.get("id") == event_id:
-
-            event = item
-            break
+    # Recuperamos el evento que ya cargamos en show_games()
+    event = pending_bets.get(
+        f"event:{sport_key}:{event_id}"
+    )
 
     if not event:
 
         await query.edit_message_text(
-            "❌ Partido no encontrado."
+            "❌ Este partido ya no está disponible.\n\n"
+            "Vuelve a la lista de partidos y selecciónalo nuevamente.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Ver partidos",
+                            callback_data=f"league:{sport_key}",
+                        )
+                    ]
+                ]
+            ),
         )
 
         return
@@ -1123,6 +1123,27 @@ async def show_game(
                 if name not in outcomes:
 
                     outcomes[name] = price
+
+    if not outcomes:
+
+        await query.edit_message_text(
+            f"⚽ {home}\n"
+            f"vs\n"
+            f"⚽ {away}\n\n"
+            "❌ No hay cuotas disponibles para este partido.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Volver",
+                            callback_data=f"league:{sport_key}",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
 
     keyboard = []
 
