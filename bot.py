@@ -1090,6 +1090,7 @@ async def show_sports(query):
             ("🇮🇹 Italia - Serie A", "soccer_italy_serie_a"),
             ("🇩🇪 Alemania - Bundesliga", "soccer_germany_bundesliga"),
             ("🇫🇷 Francia - Ligue 1", "soccer_france_ligue_one"),
+            ("🏆 UEFA - Nations League", "soccer_uefa_nations_league"),
         ]
 
         keyboard = []
