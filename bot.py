@@ -260,6 +260,8 @@ def get_event_odds(sport_key, event_id):
     )
 
     response.raise_for_status()
+    print("ODDS EVENT STATUS:", response.status_code)
+    print("ODDS EVENT RESPONSE:", response.text[:3000])
 
     return response.json()
 
