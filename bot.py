@@ -239,8 +239,6 @@ def get_event_odds(sport_key, event_id):
     """
     Obtiene las cuotas directamente del endpoint específico
     del evento.
-
-    Esto evita depender del evento almacenado en memoria.
     """
 
     url = (
@@ -260,6 +258,7 @@ def get_event_odds(sport_key, event_id):
     )
 
     response.raise_for_status()
+
     print("ODDS EVENT STATUS:", response.status_code)
     print("ODDS EVENT RESPONSE:", response.text[:3000])
 
@@ -1148,11 +1147,6 @@ async def show_game(
 
     try:
 
-        # ----------------------------------------------------
-        # IMPORTANTE:
-        # Consultamos las cuotas directamente para este evento.
-        # ----------------------------------------------------
-
         event = get_event_odds(
             sport_key,
             event_id,
@@ -1283,8 +1277,6 @@ async def show_game(
                 except (TypeError, ValueError):
                     continue
 
-                # Conservamos la mayor cuota disponible
-                # para cada selección.
                 if (
                     name not in outcomes
                     or price > outcomes[name]
@@ -1338,13 +1330,15 @@ async def show_game(
 
     for name, price in outcomes.items():
 
-        # Usamos un callback corto.
+        # IMPORTANTE:
+        # Telegram permite máximo 64 bytes en callback_data.
         #
-        # NO ponemos el nombre del equipo en callback_data
-        # porque Telegram tiene un límite de 64 bytes.
+        # Usamos solamente event_id + índice.
+        # La información completa de la selección queda
+        # almacenada en pending_bets.
+
         pick_id = (
-            f"pick:{sport_key}:"
-            f"{event_id}:"
+            f"pick:{event_id}:"
             f"{selection_index}"
         )
 
