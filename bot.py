@@ -223,7 +223,7 @@ def get_odds(sport_key):
         url,
         params={
             "apiKey": ODDS_API_KEY,
-            "regions": "us",
+            "regions": "eu",
             "markets": "h2h",
             "oddsFormat": "decimal",
         },
@@ -252,7 +252,7 @@ def get_event_odds(sport_key, event_id):
         url,
         params={
             "apiKey": ODDS_API_KEY,
-            "regions": "us",
+            "regions": "eu",
             "markets": "h2h",
             "oddsFormat": "decimal",
         },
