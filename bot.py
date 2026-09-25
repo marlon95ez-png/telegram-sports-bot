@@ -132,8 +132,6 @@ def migrate_legacy_pending_bets():
                     event_name
                 )
 
-                # Evitar duplicar una apuesta que ya exista
-                # en pending_bets.
                 cur.execute(
                     """
                     SELECT id
@@ -206,7 +204,6 @@ def migrate_legacy_pending_bets():
 
                     migrated += 1
 
-                # La apuesta deja de pertenecer al historial.
                 cur.execute(
                     """
                     DELETE FROM bets
@@ -315,10 +312,6 @@ def init_db():
                 """
             )
 
-            # ------------------------------------------------
-            # COLUMNAS ADICIONALES PARA UNCONFIRMED_BETS
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 ALTER TABLE unconfirmed_bets
@@ -332,10 +325,6 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS away_team TEXT
                 """
             )
-
-            # ------------------------------------------------
-            # ÍNDICES
-            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -361,7 +350,6 @@ def init_db():
                 """
             )
 
-    # Migrar las apuestas pendientes del sistema anterior.
     migrate_legacy_pending_bets()
 
 
@@ -533,15 +521,53 @@ def get_event_result(sport_key, event_id):
         f"sports/{sport_key}/scores/"
     )
 
-    response = requests.get(
-        url,
-        params={
-            "apiKey": ODDS_API_KEY,
-            "daysFrom": 3,
-            "eventIds": event_id,
-        },
-        timeout=30,
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "daysFrom": 3,
+        "eventIds": event_id,
+    }
+
+    # --------------------------------------------------------
+    # LOG DE DIAGNÓSTICO
+    # --------------------------------------------------------
+
+    print("========================================")
+    print("SCORES REQUEST")
+    print("SPORT:", sport_key)
+    print("EVENT ID:", event_id)
+    print(
+        "PARAMS: daysFrom=3 eventIds=",
+        event_id,
     )
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=30,
+        )
+
+    except Exception as e:
+
+        print(
+            "SCORES REQUEST ERROR:",
+            repr(e),
+        )
+
+        raise
+
+    print(
+        "SCORES STATUS:",
+        response.status_code,
+    )
+
+    print(
+        "SCORES RESPONSE:",
+        response.text[:5000],
+    )
+
+    print("========================================")
 
     response.raise_for_status()
 
@@ -550,7 +576,28 @@ def get_event_result(sport_key, event_id):
     for event in data:
 
         if event.get("id") == event_id:
+
+            print(
+                "SCORES MATCH FOUND:",
+                event_id,
+            )
+
+            print(
+                "SCORES COMPLETED:",
+                event.get("completed"),
+            )
+
+            print(
+                "SCORES DATA:",
+                event.get("scores"),
+            )
+
             return event
+
+    print(
+        "SCORES EVENT NOT FOUND IN RESPONSE:",
+        event_id,
+    )
 
     return None
 
@@ -697,8 +744,6 @@ def _settle_pending_rows(cur, rows, event):
         event.get("commence_time")
     )
 
-    # Agrupar por usuario para bloquear cada usuario
-    # solamente una vez.
     users_bets = {}
 
     for row in rows:
@@ -719,7 +764,6 @@ def _settle_pending_rows(cur, rows, event):
 
     results = []
 
-    # Orden estable para reducir posibilidad de deadlocks.
     for user_id in sorted(users_bets.keys()):
 
         cur.execute(
@@ -792,10 +836,6 @@ def _settle_pending_rows(cur, rows, event):
             total_bets += 1
             total_stake += stake
 
-            # ------------------------------------------------
-            # MOVER DE PENDING_BETS A BETS
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 INSERT INTO bets (
@@ -843,10 +883,6 @@ def _settle_pending_rows(cur, rows, event):
                 ),
             )
 
-            # ------------------------------------------------
-            # TRANSACCIÓN
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 INSERT INTO transactions (
@@ -873,10 +909,6 @@ def _settle_pending_rows(cur, rows, event):
                 ),
             )
 
-            # ------------------------------------------------
-            # ELIMINAR DE PENDING_BETS
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 DELETE FROM pending_bets
@@ -897,7 +929,6 @@ def _settle_pending_rows(cur, rows, event):
                 }
             )
 
-        # Actualizar saldo una sola vez por usuario.
         cur.execute(
             """
             UPDATE users
@@ -937,13 +968,6 @@ def _settle_pending_rows(cur, rows, event):
 # ============================================================
 
 def settle_event(event_id):
-
-    # --------------------------------------------------------
-    # PRIMERA LECTURA
-    #
-    # No bloqueamos todavía. Solamente necesitamos saber
-    # si existen apuestas y qué sport_key utilizar.
-    # --------------------------------------------------------
 
     with get_db_connection() as conn:
 
@@ -986,10 +1010,6 @@ def settle_event(event_id):
 
     sport_key = preview_rows[0][3]
 
-    # --------------------------------------------------------
-    # UNA SOLA CONSULTA A THE ODDS API
-    # --------------------------------------------------------
-
     event = get_event_result(
         sport_key,
         event_id,
@@ -1026,12 +1046,6 @@ def settle_event(event_id):
             "event": event,
         }
 
-    # --------------------------------------------------------
-    # SEGUNDA TRANSACCIÓN
-    #
-    # Ahora sí bloqueamos todas las apuestas de ese evento.
-    # --------------------------------------------------------
-
     with psycopg.connect(DATABASE_URL) as conn:
 
         with conn.cursor() as cur:
@@ -1062,8 +1076,6 @@ def settle_event(event_id):
 
             rows = cur.fetchall()
 
-            # Otro proceso pudo haber liquidado el evento
-            # mientras consultábamos The Odds API.
             if not rows:
 
                 return {
@@ -1095,10 +1107,6 @@ def settle_event(event_id):
 
 def settle_bet(bet_id):
 
-    # --------------------------------------------------------
-    # PRIMERA LECTURA
-    # --------------------------------------------------------
-
     with get_db_connection() as conn:
 
         with conn.cursor() as cur:
@@ -1129,8 +1137,6 @@ def settle_bet(bet_id):
 
     if not pending_row:
 
-        # Compatibilidad con posibles apuestas antiguas
-        # que todavía estén en bets.
         with get_db_connection() as conn:
 
             with conn.cursor() as cur:
@@ -1166,10 +1172,6 @@ def settle_bet(bet_id):
     sport_key = pending_row[3]
     event_id = pending_row[4]
 
-    # --------------------------------------------------------
-    # CONSULTA DEL RESULTADO
-    # --------------------------------------------------------
-
     event = get_event_result(
         sport_key,
         event_id,
@@ -1201,10 +1203,6 @@ def settle_bet(bet_id):
                 "final del partido."
             ),
         }
-
-    # --------------------------------------------------------
-    # BLOQUEO Y LIQUIDACIÓN
-    # --------------------------------------------------------
 
     with psycopg.connect(DATABASE_URL) as conn:
 
@@ -2453,11 +2451,6 @@ async def confirm_bet(
                 balance - stake
             )
 
-            # ------------------------------------------------
-            # NUEVA APUESTA:
-            # VA A PENDING_BETS
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 INSERT INTO pending_bets (
@@ -2506,10 +2499,6 @@ async def confirm_bet(
                 cur.fetchone()[0]
             )
 
-            # ------------------------------------------------
-            # DESCONTAR SALDO
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 UPDATE users
@@ -2522,10 +2511,6 @@ async def confirm_bet(
                     db_user_id,
                 ),
             )
-
-            # ------------------------------------------------
-            # REGISTRAR APUESTA REALIZADA
-            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -2551,10 +2536,6 @@ async def confirm_bet(
                     balance_after,
                 ),
             )
-
-            # ------------------------------------------------
-            # ELIMINAR UNCONFIRMED
-            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -2655,10 +2636,6 @@ async def show_bets(query):
 
         with conn.cursor() as cur:
 
-            # ------------------------------------------------
-            # APUESTAS PENDIENTES
-            # ------------------------------------------------
-
             cur.execute(
                 """
                 SELECT
@@ -2681,10 +2658,6 @@ async def show_bets(query):
             )
 
             pending_rows = cur.fetchall()
-
-            # ------------------------------------------------
-            # HISTORIAL
-            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -3426,8 +3399,6 @@ async def admin_settle_bet(
 
         return
 
-    # El botón antiguo termina usando el mecanismo
-    # individual de respaldo.
     await query.edit_message_text(
         f"⏳ Liquidando apuesta pendiente #{bet_id}..."
     )
@@ -3554,10 +3525,6 @@ async def button(
 
     data = query.data
 
-    # --------------------------------------------------------
-    # HOME
-    # --------------------------------------------------------
-
     if data == "home":
 
         await query.edit_message_text(
@@ -3570,19 +3537,11 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # FÚTBOL
-    # --------------------------------------------------------
-
     if data == "football":
 
         await show_sports(query)
 
         return
-
-    # --------------------------------------------------------
-    # BÉISBOL
-    # --------------------------------------------------------
 
     if data == "baseball":
 
@@ -3602,10 +3561,6 @@ async def button(
         )
 
         return
-
-    # --------------------------------------------------------
-    # SALDO
-    # --------------------------------------------------------
 
     if data == "balance":
 
@@ -3630,29 +3585,17 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # MIS APUESTAS
-    # --------------------------------------------------------
-
     if data == "mybets":
 
         await show_bets(query)
 
         return
 
-    # --------------------------------------------------------
-    # ADMIN
-    # --------------------------------------------------------
-
     if data == "admin":
 
         await show_admin_bets(query)
 
         return
-
-    # --------------------------------------------------------
-    # EVENTO ADMIN
-    # --------------------------------------------------------
 
     if data.startswith("adminevent:"):
 
@@ -3679,10 +3622,6 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # LIQUIDAR EVENTO ADMIN
-    # --------------------------------------------------------
-
     if data.startswith("settleevent:"):
 
         if not is_admin(
@@ -3707,10 +3646,6 @@ async def button(
         )
 
         return
-
-    # --------------------------------------------------------
-    # COMPATIBILIDAD: APUESTA ADMIN ANTIGUA
-    # --------------------------------------------------------
 
     if data.startswith("adminbet:"):
 
@@ -3749,10 +3684,6 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # COMPATIBILIDAD: LIQUIDAR APUESTA ANTIGUA
-    # --------------------------------------------------------
-
     if data.startswith("settle:"):
 
         if not is_admin(
@@ -3790,10 +3721,6 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # CONFIRMAR
-    # --------------------------------------------------------
-
     if data.startswith("confirm:"):
 
         try:
@@ -3819,10 +3746,6 @@ async def button(
         )
 
         return
-
-    # --------------------------------------------------------
-    # CANCELAR
-    # --------------------------------------------------------
 
     if data.startswith("cancel:"):
 
@@ -3850,10 +3773,6 @@ async def button(
 
         return
 
-    # --------------------------------------------------------
-    # LIGA
-    # --------------------------------------------------------
-
     if data.startswith("league:"):
 
         sport_key = data.split(
@@ -3867,10 +3786,6 @@ async def button(
         )
 
         return
-
-    # --------------------------------------------------------
-    # PARTIDO
-    # --------------------------------------------------------
 
     if data.startswith("game:"):
 
@@ -3897,10 +3812,6 @@ async def button(
         )
 
         return
-
-    # --------------------------------------------------------
-    # SELECCIÓN
-    # --------------------------------------------------------
 
     if data.startswith("pick:"):
 
@@ -3944,10 +3855,6 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # COMANDOS
-    # --------------------------------------------------------
-
     application.add_handler(
         CommandHandler(
             "start",
@@ -3983,19 +3890,11 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # BOTONES
-    # --------------------------------------------------------
-
     application.add_handler(
         CallbackQueryHandler(
             button
         )
     )
-
-    # --------------------------------------------------------
-    # MENSAJES DE TEXTO
-    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
