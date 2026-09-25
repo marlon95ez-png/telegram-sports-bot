@@ -44,11 +44,194 @@ def get_db_connection():
     return psycopg.connect(DATABASE_URL)
 
 
-def init_db():
+def split_event_name(event_name):
+    if not event_name:
+        return "Local", "Visitante"
+
+    if " vs " in event_name:
+        return event_name.split(" vs ", 1)
+
+    return event_name, ""
+
+
+def parse_event_datetime(value):
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(
+            value.replace("Z", "+00:00")
+        )
+
+        if parsed.tzinfo is not None:
+            parsed = parsed.replace(tzinfo=None)
+
+        return parsed
+
+    except Exception:
+        return None
+
+
+def migrate_legacy_pending_bets():
+    """
+    Migra las apuestas que pertenecían al sistema anterior y que
+    todavía están guardadas en bets con estado Pendiente.
+
+    Esto evita perder apuestas pendientes después del cambio
+    hacia la nueva arquitectura:
+        pending_bets -> apuestas pendientes
+        bets         -> historial liquidado
+    """
+
+    migrated = 0
+    removed = 0
+
     with get_db_connection() as conn:
+
         with conn.cursor() as cur:
 
-            cur.execute("""
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    event_name,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    created_at
+                FROM bets
+                WHERE status = 'Pendiente'
+                ORDER BY id ASC
+                """
+            )
+
+            rows = cur.fetchall()
+
+            for row in rows:
+
+                (
+                    old_bet_id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    event_name,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    created_at,
+                ) = row
+
+                home_team, away_team = split_event_name(
+                    event_name
+                )
+
+                # Evitar duplicar una apuesta que ya exista
+                # en pending_bets.
+                cur.execute(
+                    """
+                    SELECT id
+                    FROM pending_bets
+                    WHERE user_id = %s
+                      AND event_id = %s
+                      AND selection = %s
+                      AND stake = %s
+                      AND created_at = %s
+                    LIMIT 1
+                    """,
+                    (
+                        user_id,
+                        event_id,
+                        selection,
+                        stake,
+                        created_at,
+                    ),
+                )
+
+                existing = cur.fetchone()
+
+                if not existing:
+
+                    cur.execute(
+                        """
+                        INSERT INTO pending_bets (
+                            user_id,
+                            sport,
+                            competition,
+                            event_id,
+                            home_team,
+                            away_team,
+                            selection,
+                            odds,
+                            stake,
+                            potential_return,
+                            expires_at,
+                            created_at
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            %s,
+                            NULL,
+                            %s
+                        )
+                        """,
+                        (
+                            user_id,
+                            sport,
+                            competition,
+                            event_id,
+                            home_team,
+                            away_team,
+                            selection,
+                            odds,
+                            stake,
+                            potential_return,
+                            created_at,
+                        ),
+                    )
+
+                    migrated += 1
+
+                # La apuesta deja de pertenecer al historial.
+                cur.execute(
+                    """
+                    DELETE FROM bets
+                    WHERE id = %s
+                    """,
+                    (old_bet_id,),
+                )
+
+                removed += 1
+
+    if migrated or removed:
+        print(
+            "MIGRACION APUESTAS PENDIENTES: "
+            f"migradas={migrated}, eliminadas_de_bets={removed}"
+        )
+
+
+def init_db():
+
+    with get_db_connection() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
                     telegram_id BIGINT UNIQUE NOT NULL,
@@ -57,9 +240,11 @@ def init_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+                """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS bets (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER REFERENCES users(id),
@@ -75,9 +260,11 @@ def init_db():
                     status TEXT DEFAULT 'Pendiente',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+                """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS transactions (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER REFERENCES users(id),
@@ -87,9 +274,11 @@ def init_db():
                     balance_after NUMERIC,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+                """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS pending_bets (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER REFERENCES users(id),
@@ -105,9 +294,11 @@ def init_db():
                     expires_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+                """
+            )
 
-            cur.execute("""
+            cur.execute(
+                """
                 CREATE TABLE IF NOT EXISTS unconfirmed_bets (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER REFERENCES users(id),
@@ -121,7 +312,57 @@ def init_db():
                     potential_return NUMERIC,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
-            """)
+                """
+            )
+
+            # ------------------------------------------------
+            # COLUMNAS ADICIONALES PARA UNCONFIRMED_BETS
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                ALTER TABLE unconfirmed_bets
+                ADD COLUMN IF NOT EXISTS home_team TEXT
+                """
+            )
+
+            cur.execute(
+                """
+                ALTER TABLE unconfirmed_bets
+                ADD COLUMN IF NOT EXISTS away_team TEXT
+                """
+            )
+
+            # ------------------------------------------------
+            # ÍNDICES
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_pending_bets_event_id
+                ON pending_bets(event_id)
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_pending_bets_user_id
+                ON pending_bets(user_id)
+                """
+            )
+
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS
+                idx_bets_event_id
+                ON bets(event_id)
+                """
+            )
+
+    # Migrar las apuestas pendientes del sistema anterior.
+    migrate_legacy_pending_bets()
 
 
 # ============================================================
@@ -129,7 +370,9 @@ def init_db():
 # ============================================================
 
 def get_or_create_user(telegram_user):
+
     with get_db_connection() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -144,6 +387,7 @@ def get_or_create_user(telegram_user):
             user = cur.fetchone()
 
             if user:
+
                 cur.execute(
                     """
                     UPDATE users
@@ -151,7 +395,10 @@ def get_or_create_user(telegram_user):
                         updated_at = CURRENT_TIMESTAMP
                     WHERE telegram_id = %s
                     """,
-                    (telegram_user.username, telegram_user.id),
+                    (
+                        telegram_user.username,
+                        telegram_user.id,
+                    ),
                 )
 
                 return user
@@ -176,7 +423,9 @@ def get_or_create_user(telegram_user):
 
 
 def get_user_balance(telegram_id):
+
     with get_db_connection() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute(
@@ -201,6 +450,7 @@ def get_user_balance(telegram_id):
 # ============================================================
 
 def get_sports():
+
     url = "https://api.the-odds-api.com/v4/sports/"
 
     response = requests.get(
@@ -217,7 +467,11 @@ def get_sports():
 
 
 def get_odds(sport_key):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+
+    url = (
+        f"https://api.the-odds-api.com/v4/"
+        f"sports/{sport_key}/odds/"
+    )
 
     response = requests.get(
         url,
@@ -236,10 +490,6 @@ def get_odds(sport_key):
 
 
 def get_event_odds(sport_key, event_id):
-    """
-    Obtiene las cuotas directamente del endpoint específico
-    del evento.
-    """
 
     url = (
         f"https://api.the-odds-api.com/v4/sports/"
@@ -259,8 +509,15 @@ def get_event_odds(sport_key, event_id):
 
     response.raise_for_status()
 
-    print("ODDS EVENT STATUS:", response.status_code)
-    print("ODDS EVENT RESPONSE:", response.text[:3000])
+    print(
+        "ODDS EVENT STATUS:",
+        response.status_code,
+    )
+
+    print(
+        "ODDS EVENT RESPONSE:",
+        response.text[:3000],
+    )
 
     return response.json()
 
@@ -270,7 +527,11 @@ def get_event_odds(sport_key, event_id):
 # ============================================================
 
 def get_event_result(sport_key, event_id):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+
+    url = (
+        f"https://api.the-odds-api.com/v4/"
+        f"sports/{sport_key}/scores/"
+    )
 
     response = requests.get(
         url,
@@ -287,6 +548,7 @@ def get_event_result(sport_key, event_id):
     data = response.json()
 
     for event in data:
+
         if event.get("id") == event_id:
             return event
 
@@ -294,7 +556,11 @@ def get_event_result(sport_key, event_id):
 
 
 def get_recent_completed_events(sport_key):
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores/"
+
+    url = (
+        f"https://api.the-odds-api.com/v4/"
+        f"sports/{sport_key}/scores/"
+    )
 
     response = requests.get(
         url,
@@ -315,6 +581,7 @@ def get_recent_completed_events(sport_key):
 # ============================================================
 
 def determine_h2h_result(event):
+
     scores = event.get("scores")
 
     if not scores or len(scores) < 2:
@@ -327,10 +594,20 @@ def determine_h2h_result(event):
     away_score = None
 
     for score in scores:
+
         if score.get("name") == home_team:
-            home_score = int(score.get("score"))
+
+            try:
+                home_score = int(score.get("score"))
+            except (TypeError, ValueError):
+                return None
+
         elif score.get("name") == away_team:
-            away_score = int(score.get("score"))
+
+            try:
+                away_score = int(score.get("score"))
+            except (TypeError, ValueError):
+                return None
 
     if home_score is None or away_score is None:
         return None
@@ -345,6 +622,7 @@ def determine_h2h_result(event):
 
 
 def evaluate_h2h_selection(event, selection):
+
     result = determine_h2h_result(event)
 
     if result is None:
@@ -354,291 +632,22 @@ def evaluate_h2h_selection(event, selection):
 
 
 # ============================================================
-# LIQUIDACIÓN ATÓMICA
+# UTILIDADES DE RESULTADO
 # ============================================================
 
-def settle_bet(bet_id):
+def get_event_score_text(event):
 
-    with psycopg.connect(DATABASE_URL) as conn:
-
-        try:
-
-            with conn.cursor() as cur:
-
-                cur.execute(
-                    """
-                    SELECT
-                        id,
-                        user_id,
-                        sport,
-                        competition,
-                        event_id,
-                        event_name,
-                        selection,
-                        odds,
-                        stake,
-                        potential_return,
-                        status
-                    FROM bets
-                    WHERE id = %s
-                    FOR UPDATE
-                    """,
-                    (bet_id,),
-                )
-
-                bet = cur.fetchone()
-
-                if not bet:
-                    return {
-                        "success": False,
-                        "message": "La apuesta no existe.",
-                    }
-
-                (
-                    bet_id,
-                    user_id,
-                    sport,
-                    competition,
-                    event_id,
-                    event_name,
-                    selection,
-                    odds,
-                    stake,
-                    potential_return,
-                    status,
-                ) = bet
-
-                if status != "Pendiente":
-                    return {
-                        "success": False,
-                        "already_processed": True,
-                        "status": status,
-                        "message": (
-                            f"La apuesta ya fue procesada. "
-                            f"Estado actual: {status}."
-                        ),
-                    }
-
-                sport_key = competition
-
-                event = get_event_result(
-                    sport_key,
-                    event_id,
-                )
-
-                if not event:
-                    return {
-                        "success": False,
-                        "message": (
-                            "El resultado todavía no está disponible "
-                            "en The Odds API."
-                        ),
-                    }
-
-                if not event.get("completed"):
-                    return {
-                        "success": False,
-                        "message": "El partido todavía no ha terminado.",
-                    }
-
-                result = determine_h2h_result(event)
-
-                if result is None:
-                    return {
-                        "success": False,
-                        "message": (
-                            "No fue posible determinar el resultado "
-                            "final del partido."
-                        ),
-                    }
-
-                won = result == selection
-
-                cur.execute(
-                    """
-                    SELECT balance
-                    FROM users
-                    WHERE id = %s
-                    FOR UPDATE
-                    """,
-                    (user_id,),
-                )
-
-                user_row = cur.fetchone()
-
-                if not user_row:
-                    conn.rollback()
-
-                    return {
-                        "success": False,
-                        "message": "Usuario no encontrado.",
-                    }
-
-                current_balance = user_row[0]
-
-                if won:
-
-                    new_balance = current_balance + potential_return
-
-                    cur.execute(
-                        """
-                        UPDATE users
-                        SET balance = %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE id = %s
-                        """,
-                        (
-                            new_balance,
-                            user_id,
-                        ),
-                    )
-
-                    cur.execute(
-                        """
-                        UPDATE bets
-                        SET status = 'Ganada'
-                        WHERE id = %s
-                        """,
-                        (bet_id,),
-                    )
-
-                    cur.execute(
-                        """
-                        INSERT INTO transactions (
-                            user_id,
-                            type,
-                            amount,
-                            balance_before,
-                            balance_after
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (
-                            user_id,
-                            "bet_win",
-                            potential_return,
-                            current_balance,
-                            new_balance,
-                        ),
-                    )
-
-                    conn.commit()
-
-                    return {
-                        "success": True,
-                        "won": True,
-                        "status": "Ganada",
-                        "event": event,
-                        "result": result,
-                        "balance": new_balance,
-                        "potential_return": potential_return,
-                    }
-
-                else:
-
-                    new_balance = current_balance
-
-                    cur.execute(
-                        """
-                        UPDATE bets
-                        SET status = 'Perdida'
-                        WHERE id = %s
-                        """,
-                        (bet_id,),
-                    )
-
-                    cur.execute(
-                        """
-                        INSERT INTO transactions (
-                            user_id,
-                            type,
-                            amount,
-                            balance_before,
-                            balance_after
-                        )
-                        VALUES (%s, %s, %s, %s, %s)
-                        """,
-                        (
-                            user_id,
-                            "bet_loss",
-                            0,
-                            current_balance,
-                            new_balance,
-                        ),
-                    )
-
-                    conn.commit()
-
-                    return {
-                        "success": True,
-                        "won": False,
-                        "status": "Perdida",
-                        "event": event,
-                        "result": result,
-                        "balance": new_balance,
-                        "potential_return": potential_return,
-                    }
-
-        except Exception:
-
-            conn.rollback()
-
-            raise
-
-
-# ============================================================
-# COMANDO /LIQUIDAR
-# SOLO ADMIN
-# ============================================================
-
-async def test_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    telegram_user = update.effective_user
-
-    if not is_admin(telegram_user.id):
-        await update.message.reply_text(
-            "⛔ No tienes permisos para utilizar esta función."
-        )
-        return
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "Uso:\n/liquidar ID_APUESTA"
-        )
-
-        return
-
-    try:
-        bet_id = int(context.args[0])
-    except ValueError:
-
-        await update.message.reply_text(
-            "❌ El ID de la apuesta debe ser un número."
-        )
-
-        return
-
-    await update.message.reply_text(
-        f"⏳ Liquidando apuesta #{bet_id}..."
+    home_team = event.get(
+        "home_team",
+        "Local",
     )
 
-    result = settle_bet(bet_id)
+    away_team = event.get(
+        "away_team",
+        "Visitante",
+    )
 
-    if not result["success"]:
-
-        await update.message.reply_text(
-            result["message"]
-        )
-
-        return
-
-    event = result["event"]
-
-    home_team = event.get("home_team", "Local")
-    away_team = event.get("away_team", "Visitante")
-
-    scores = event.get("scores", [])
+    scores = event.get("scores") or []
 
     home_score = "?"
     away_score = "?"
@@ -651,10 +660,691 @@ async def test_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif score.get("name") == away_team:
             away_score = score.get("score")
 
+    return (
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+    )
+
+
+# ============================================================
+# LIQUIDACIÓN DE FILAS PENDIENTES
+# ============================================================
+
+def _settle_pending_rows(cur, rows, event):
+
+    result = determine_h2h_result(event)
+
+    if result is None:
+        return None
+
+    home_team = event.get(
+        "home_team",
+        "Local",
+    )
+
+    away_team = event.get(
+        "away_team",
+        "Visitante",
+    )
+
+    event_name = (
+        f"{home_team} vs {away_team}"
+    )
+
+    match_date = parse_event_datetime(
+        event.get("commence_time")
+    )
+
+    # Agrupar por usuario para bloquear cada usuario
+    # solamente una vez.
+    users_bets = {}
+
+    for row in rows:
+
+        user_id = row[1]
+
+        users_bets.setdefault(
+            user_id,
+            []
+        ).append(row)
+
+    total_bets = 0
+    won_count = 0
+    lost_count = 0
+    total_paid = 0
+    total_stake = 0
+    users_affected = 0
+
+    results = []
+
+    # Orden estable para reducir posibilidad de deadlocks.
+    for user_id in sorted(users_bets.keys()):
+
+        cur.execute(
+            """
+            SELECT balance
+            FROM users
+            WHERE id = %s
+            FOR UPDATE
+            """,
+            (user_id,),
+        )
+
+        user_row = cur.fetchone()
+
+        if not user_row:
+            raise ValueError(
+                f"Usuario {user_id} no encontrado."
+            )
+
+        current_balance = user_row[0]
+        starting_balance = current_balance
+
+        user_had_win = False
+
+        for row in users_bets[user_id]:
+
+            (
+                pending_id,
+                row_user_id,
+                sport,
+                competition,
+                event_id,
+                row_home_team,
+                row_away_team,
+                selection,
+                odds,
+                stake,
+                potential_return,
+                expires_at,
+                created_at,
+            ) = row
+
+            won = result == selection
+
+            balance_before = current_balance
+
+            if won:
+
+                current_balance = (
+                    current_balance
+                    + potential_return
+                )
+
+                won_count += 1
+                total_paid += potential_return
+                user_had_win = True
+
+                status = "Ganada"
+                transaction_type = "bet_win"
+                transaction_amount = potential_return
+
+            else:
+
+                status = "Perdida"
+                transaction_type = "bet_loss"
+                transaction_amount = 0
+
+                lost_count += 1
+
+            total_bets += 1
+            total_stake += stake
+
+            # ------------------------------------------------
+            # MOVER DE PENDING_BETS A BETS
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                INSERT INTO bets (
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    event_name,
+                    match_date,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    status,
+                    created_at
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    row_user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    event_name,
+                    match_date,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    status,
+                    created_at,
+                ),
+            )
+
+            # ------------------------------------------------
+            # TRANSACCIÓN
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                INSERT INTO transactions (
+                    user_id,
+                    type,
+                    amount,
+                    balance_before,
+                    balance_after
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
+                )
+                """,
+                (
+                    row_user_id,
+                    transaction_type,
+                    transaction_amount,
+                    balance_before,
+                    current_balance,
+                ),
+            )
+
+            # ------------------------------------------------
+            # ELIMINAR DE PENDING_BETS
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                DELETE FROM pending_bets
+                WHERE id = %s
+                """,
+                (pending_id,),
+            )
+
+            results.append(
+                {
+                    "pending_id": pending_id,
+                    "user_id": row_user_id,
+                    "selection": selection,
+                    "won": won,
+                    "status": status,
+                    "potential_return": potential_return,
+                    "balance_after": current_balance,
+                }
+            )
+
+        # Actualizar saldo una sola vez por usuario.
+        cur.execute(
+            """
+            UPDATE users
+            SET balance = %s,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = %s
+            """,
+            (
+                current_balance,
+                user_id,
+            ),
+        )
+
+        if current_balance != starting_balance:
+            users_affected += 1
+        elif user_had_win:
+            users_affected += 1
+
+    return {
+        "result": result,
+        "home_team": home_team,
+        "away_team": away_team,
+        "event_name": event_name,
+        "match_date": match_date,
+        "total_bets": total_bets,
+        "won_count": won_count,
+        "lost_count": lost_count,
+        "total_paid": total_paid,
+        "total_stake": total_stake,
+        "users_affected": users_affected,
+        "results": results,
+    }
+
+
+# ============================================================
+# LIQUIDAR TODAS LAS APUESTAS DE UN PARTIDO
+# ============================================================
+
+def settle_event(event_id):
+
+    # --------------------------------------------------------
+    # PRIMERA LECTURA
+    #
+    # No bloqueamos todavía. Solamente necesitamos saber
+    # si existen apuestas y qué sport_key utilizar.
+    # --------------------------------------------------------
+
+    with get_db_connection() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    home_team,
+                    away_team,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    expires_at,
+                    created_at
+                FROM pending_bets
+                WHERE event_id = %s
+                ORDER BY user_id ASC, id ASC
+                """,
+                (event_id,),
+            )
+
+            preview_rows = cur.fetchall()
+
+    if not preview_rows:
+
+        return {
+            "success": False,
+            "already_processed": True,
+            "message": (
+                "No hay apuestas pendientes para este partido."
+            ),
+        }
+
+    sport_key = preview_rows[0][3]
+
+    # --------------------------------------------------------
+    # UNA SOLA CONSULTA A THE ODDS API
+    # --------------------------------------------------------
+
+    event = get_event_result(
+        sport_key,
+        event_id,
+    )
+
+    if not event:
+
+        return {
+            "success": False,
+            "message": (
+                "El resultado todavía no está disponible "
+                "en The Odds API."
+            ),
+        }
+
+    if not event.get("completed"):
+
+        return {
+            "success": False,
+            "message": "El partido todavía no ha terminado.",
+            "event": event,
+        }
+
+    result = determine_h2h_result(event)
+
+    if result is None:
+
+        return {
+            "success": False,
+            "message": (
+                "No fue posible determinar el resultado "
+                "final del partido."
+            ),
+            "event": event,
+        }
+
+    # --------------------------------------------------------
+    # SEGUNDA TRANSACCIÓN
+    #
+    # Ahora sí bloqueamos todas las apuestas de ese evento.
+    # --------------------------------------------------------
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    home_team,
+                    away_team,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    expires_at,
+                    created_at
+                FROM pending_bets
+                WHERE event_id = %s
+                ORDER BY user_id ASC, id ASC
+                FOR UPDATE
+                """,
+                (event_id,),
+            )
+
+            rows = cur.fetchall()
+
+            # Otro proceso pudo haber liquidado el evento
+            # mientras consultábamos The Odds API.
+            if not rows:
+
+                return {
+                    "success": False,
+                    "already_processed": True,
+                    "message": (
+                        "Las apuestas de este partido "
+                        "ya fueron procesadas."
+                    ),
+                    "event": event,
+                }
+
+            summary = _settle_pending_rows(
+                cur,
+                rows,
+                event,
+            )
+
+    summary["success"] = True
+    summary["event"] = event
+
+    return summary
+
+
+# ============================================================
+# LIQUIDAR UNA SOLA APUESTA
+# RESPALDO /LIQUIDAR
+# ============================================================
+
+def settle_bet(bet_id):
+
+    # --------------------------------------------------------
+    # PRIMERA LECTURA
+    # --------------------------------------------------------
+
+    with get_db_connection() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    home_team,
+                    away_team,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    expires_at,
+                    created_at
+                FROM pending_bets
+                WHERE id = %s
+                """,
+                (bet_id,),
+            )
+
+            pending_row = cur.fetchone()
+
+    if not pending_row:
+
+        # Compatibilidad con posibles apuestas antiguas
+        # que todavía estén en bets.
+        with get_db_connection() as conn:
+
+            with conn.cursor() as cur:
+
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM bets
+                    WHERE id = %s
+                    """,
+                    (bet_id,),
+                )
+
+                old_row = cur.fetchone()
+
+        if old_row:
+
+            return {
+                "success": False,
+                "already_processed": True,
+                "status": old_row[0],
+                "message": (
+                    f"La apuesta ya fue procesada. "
+                    f"Estado actual: {old_row[0]}."
+                ),
+            }
+
+        return {
+            "success": False,
+            "message": "La apuesta no existe.",
+        }
+
+    sport_key = pending_row[3]
+    event_id = pending_row[4]
+
+    # --------------------------------------------------------
+    # CONSULTA DEL RESULTADO
+    # --------------------------------------------------------
+
+    event = get_event_result(
+        sport_key,
+        event_id,
+    )
+
+    if not event:
+
+        return {
+            "success": False,
+            "message": (
+                "El resultado todavía no está disponible "
+                "en The Odds API."
+            ),
+        }
+
+    if not event.get("completed"):
+
+        return {
+            "success": False,
+            "message": "El partido todavía no ha terminado.",
+        }
+
+    if determine_h2h_result(event) is None:
+
+        return {
+            "success": False,
+            "message": (
+                "No fue posible determinar el resultado "
+                "final del partido."
+            ),
+        }
+
+    # --------------------------------------------------------
+    # BLOQUEO Y LIQUIDACIÓN
+    # --------------------------------------------------------
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    sport,
+                    competition,
+                    event_id,
+                    home_team,
+                    away_team,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    expires_at,
+                    created_at
+                FROM pending_bets
+                WHERE id = %s
+                FOR UPDATE
+                """,
+                (bet_id,),
+            )
+
+            row = cur.fetchone()
+
+            if not row:
+
+                return {
+                    "success": False,
+                    "already_processed": True,
+                    "message": (
+                        "La apuesta ya fue procesada."
+                    ),
+                    "event": event,
+                }
+
+            summary = _settle_pending_rows(
+                cur,
+                [row],
+                event,
+            )
+
+            result_data = summary["results"][0]
+
+    return {
+        "success": True,
+        "won": result_data["won"],
+        "status": result_data["status"],
+        "event": event,
+        "result": summary["result"],
+        "balance": result_data["balance_after"],
+        "potential_return": result_data[
+            "potential_return"
+        ],
+    }
+
+
+# ============================================================
+# COMANDO /LIQUIDAR
+# SOLO ADMIN
+# ============================================================
+
+async def test_settle(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    telegram_user = update.effective_user
+
+    if not is_admin(telegram_user.id):
+
+        await update.message.reply_text(
+            "⛔ No tienes permisos para utilizar esta función."
+        )
+
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "Uso:\n/liquidar ID_APUESTA"
+        )
+
+        return
+
+    try:
+
+        bet_id = int(context.args[0])
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ El ID de la apuesta debe ser un número."
+        )
+
+        return
+
+    await update.message.reply_text(
+        f"⏳ Liquidando apuesta pendiente #{bet_id}..."
+    )
+
+    try:
+
+        result = settle_bet(bet_id)
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ Error liquidando la apuesta:\n{e}"
+        )
+
+        return
+
+    if not result["success"]:
+
+        await update.message.reply_text(
+            result["message"]
+        )
+
+        return
+
+    event = result["event"]
+
+    (
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+    ) = get_event_score_text(event)
+
     if result["won"]:
 
         message = (
             "✅ APUESTA LIQUIDADA\n\n"
+            f"🎟 Apuesta pendiente #{bet_id}\n\n"
             f"⚽ {home_team}\n"
             "vs\n"
             f"⚽ {away_team}\n\n"
@@ -670,6 +1360,7 @@ async def test_settle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         message = (
             "❌ APUESTA LIQUIDADA\n\n"
+            f"🎟 Apuesta pendiente #{bet_id}\n\n"
             f"⚽ {home_team}\n"
             "vs\n"
             f"⚽ {away_team}\n\n"
@@ -703,7 +1394,10 @@ async def test_recent_results(
     sport_key = context.args[0]
 
     try:
-        events = get_recent_completed_events(sport_key)
+
+        events = get_recent_completed_events(
+            sport_key
+        )
 
     except Exception as e:
 
@@ -737,7 +1431,9 @@ async def test_recent_results(
             score_map = {}
 
             for score in scores:
-                score_map[score.get("name")] = score.get("score")
+                score_map[
+                    score.get("name")
+                ] = score.get("score")
 
             score_text = (
                 f"{score_map.get(home, '?')} - "
@@ -775,6 +1471,7 @@ async def test_result(
     event_id = context.args[1]
 
     try:
+
         event = get_event_result(
             sport_key,
             event_id,
@@ -923,7 +1620,10 @@ def home_keyboard(user_id=None):
         ],
     ]
 
-    if user_id is not None and is_admin(user_id):
+    if (
+        user_id is not None
+        and is_admin(user_id)
+    ):
 
         keyboard.append(
             [
@@ -954,7 +1654,9 @@ async def start(
         "🏆 CUBA SPORTS\n\n"
         "Bienvenido.\n"
         "Selecciona una opción:",
-        reply_markup=home_keyboard(telegram_user.id),
+        reply_markup=home_keyboard(
+            telegram_user.id
+        ),
     )
 
 
@@ -968,37 +1670,49 @@ async def show_sports(query):
         [
             InlineKeyboardButton(
                 "🇪🇸 LaLiga",
-                callback_data="league:soccer_spain_la_liga",
+                callback_data=(
+                    "league:soccer_spain_la_liga"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "🏴 Premier League",
-                callback_data="league:soccer_epl",
+                callback_data=(
+                    "league:soccer_epl"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "🇮🇹 Serie A",
-                callback_data="league:soccer_italy_serie_a",
+                callback_data=(
+                    "league:soccer_italy_serie_a"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "🇩🇪 Bundesliga",
-                callback_data="league:soccer_germany_bundesliga",
+                callback_data=(
+                    "league:soccer_germany_bundesliga"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "🇫🇷 Ligue 1",
-                callback_data="league:soccer_france_ligue_one",
+                callback_data=(
+                    "league:soccer_france_ligue_one"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "🌍 UEFA Nations League",
-                callback_data="league:soccer_uefa_nations_league",
+                callback_data=(
+                    "league:soccer_uefa_nations_league"
+                ),
             )
         ],
         [
@@ -1011,7 +1725,9 @@ async def show_sports(query):
 
     await query.edit_message_text(
         "⚽ Selecciona una competición:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -1030,21 +1746,30 @@ async def show_games(query, sport_key):
         response = getattr(e, "response", None)
 
         if response is not None:
+
             try:
+
                 error_data = response.json()
+
                 error_message = error_data.get(
                     "message",
                     response.text,
                 )
+
             except Exception:
+
                 error_message = response.text
 
             text = (
                 "❌ Error de The Odds API\n\n"
                 f"{error_message}"
             )
+
         else:
-            text = f"❌ Error obteniendo partidos:\n{e}"
+
+            text = (
+                f"❌ Error obteniendo partidos:\n{e}"
+            )
 
         await query.edit_message_text(
             text,
@@ -1104,8 +1829,15 @@ async def show_games(query, sport_key):
 
         event_id = event.get("id")
 
-        home = event.get("home_team", "")
-        away = event.get("away_team", "")
+        home = event.get(
+            "home_team",
+            "",
+        )
+
+        away = event.get(
+            "away_team",
+            "",
+        )
 
         pending_bets[
             f"event:{sport_key}:{event_id}"
@@ -1115,7 +1847,9 @@ async def show_games(query, sport_key):
             [
                 InlineKeyboardButton(
                     f"⚽ {home} vs {away}",
-                    callback_data=f"game:{sport_key}:{event_id}",
+                    callback_data=(
+                        f"game:{sport_key}:{event_id}"
+                    ),
                 )
             ]
         )
@@ -1131,7 +1865,9 @@ async def show_games(query, sport_key):
 
     await query.edit_message_text(
         "📅 Partidos disponibles:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -1159,6 +1895,7 @@ async def show_game(
         if response is not None:
 
             try:
+
                 error_data = response.json()
 
                 error_message = error_data.get(
@@ -1172,7 +1909,7 @@ async def show_game(
 
             text = (
                 "❌ No se pudieron obtener las cuotas.\n\n"
-                f"The Odds API respondió:\n"
+                "The Odds API respondió:\n"
                 f"{error_message}"
             )
 
@@ -1190,13 +1927,17 @@ async def show_game(
                     [
                         InlineKeyboardButton(
                             "🔄 Intentar nuevamente",
-                            callback_data=f"game:{sport_key}:{event_id}",
+                            callback_data=(
+                                f"game:{sport_key}:{event_id}"
+                            ),
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             "⬅️ Volver",
-                            callback_data=f"league:{sport_key}",
+                            callback_data=(
+                                f"league:{sport_key}"
+                            ),
                         )
                     ],
                 ]
@@ -1214,13 +1955,17 @@ async def show_game(
                     [
                         InlineKeyboardButton(
                             "🔄 Intentar nuevamente",
-                            callback_data=f"game:{sport_key}:{event_id}",
+                            callback_data=(
+                                f"game:{sport_key}:{event_id}"
+                            ),
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             "⬅️ Volver",
-                            callback_data=f"league:{sport_key}",
+                            callback_data=(
+                                f"league:{sport_key}"
+                            ),
                         )
                     ],
                 ]
@@ -1239,7 +1984,9 @@ async def show_game(
                     [
                         InlineKeyboardButton(
                             "⬅️ Volver",
-                            callback_data=f"league:{sport_key}",
+                            callback_data=(
+                                f"league:{sport_key}"
+                            ),
                         )
                     ]
                 ]
@@ -1248,33 +1995,56 @@ async def show_game(
 
         return
 
-    home = event.get("home_team", "Local")
-    away = event.get("away_team", "Visitante")
+    home = event.get(
+        "home_team",
+        "Local",
+    )
+
+    away = event.get(
+        "away_team",
+        "Visitante",
+    )
 
     outcomes = {}
 
     # --------------------------------------------------------
-    # RECORRER TODAS LAS CASAS Y TOMAR LA MAYOR CUOTA
+    # TODAS LAS CASAS - TOMAR MAYOR CUOTA
     # --------------------------------------------------------
 
-    for bookmaker in event.get("bookmakers", []):
+    for bookmaker in event.get(
+        "bookmakers",
+        []
+    ):
 
-        for market in bookmaker.get("markets", []):
+        for market in bookmaker.get(
+            "markets",
+            []
+        ):
 
             if market.get("key") != "h2h":
                 continue
 
-            for outcome in market.get("outcomes", []):
+            for outcome in market.get(
+                "outcomes",
+                []
+            ):
 
                 name = outcome.get("name")
                 price = outcome.get("price")
 
-                if name is None or price is None:
+                if (
+                    name is None
+                    or price is None
+                ):
                     continue
 
                 try:
                     price = float(price)
-                except (TypeError, ValueError):
+
+                except (
+                    TypeError,
+                    ValueError,
+                ):
                     continue
 
                 if (
@@ -1284,13 +2054,16 @@ async def show_game(
                     outcomes[name] = price
 
     # --------------------------------------------------------
-    # NO HAY CUOTAS
+    # SIN CUOTAS
     # --------------------------------------------------------
 
     if not outcomes:
 
         bookmakers_count = len(
-            event.get("bookmakers", [])
+            event.get(
+                "bookmakers",
+                []
+            )
         )
 
         await query.edit_message_text(
@@ -1305,15 +2078,19 @@ async def show_game(
                     [
                         InlineKeyboardButton(
                             "🔄 Actualizar cuotas",
-                            callback_data=f"game:{sport_key}:{event_id}",
+                            callback_data=(
+                                f"game:{sport_key}:{event_id}"
+                            ),
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             "⬅️ Volver",
-                            callback_data=f"league:{sport_key}",
+                            callback_data=(
+                                f"league:{sport_key}"
+                            ),
                         )
-                    ]
+                    ],
                 ]
             ),
         )
@@ -1321,7 +2098,7 @@ async def show_game(
         return
 
     # --------------------------------------------------------
-    # CREAR BOTONES
+    # BOTONES DE SELECCIÓN
     # --------------------------------------------------------
 
     keyboard = []
@@ -1329,13 +2106,6 @@ async def show_game(
     selection_index = 0
 
     for name, price in outcomes.items():
-
-        # IMPORTANTE:
-        # Telegram permite máximo 64 bytes en callback_data.
-        #
-        # Usamos solamente event_id + índice.
-        # La información completa de la selección queda
-        # almacenada en pending_bets.
 
         pick_id = (
             f"pick:{event_id}:"
@@ -1362,15 +2132,13 @@ async def show_game(
 
         selection_index += 1
 
-    # --------------------------------------------------------
-    # ACTUALIZAR / VOLVER
-    # --------------------------------------------------------
-
     keyboard.append(
         [
             InlineKeyboardButton(
                 "🔄 Actualizar cuotas",
-                callback_data=f"game:{sport_key}:{event_id}",
+                callback_data=(
+                    f"game:{sport_key}:{event_id}"
+                ),
             )
         ]
     )
@@ -1379,7 +2147,9 @@ async def show_game(
         [
             InlineKeyboardButton(
                 "⬅️ Volver",
-                callback_data=f"league:{sport_key}",
+                callback_data=(
+                    f"league:{sport_key}"
+                ),
             )
         ]
     )
@@ -1390,7 +2160,9 @@ async def show_game(
         f"⚽ {away}\n\n"
         "📈 CUOTAS DISPONIBLES\n\n"
         "Selecciona tu apuesta:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -1398,7 +2170,10 @@ async def show_game(
 # PEDIR MONTO
 # ============================================================
 
-async def ask_amount(query, pick_id):
+async def ask_amount(
+    query,
+    pick_id,
+):
 
     user_id = query.from_user.id
 
@@ -1413,9 +2188,13 @@ async def ask_amount(query, pick_id):
 
         return
 
-    balance = get_user_balance(user_id)
+    balance = get_user_balance(
+        user_id
+    )
 
-    pending_bets[f"active:{user_id}"] = pick
+    pending_bets[
+        f"active:{user_id}"
+    ] = pick
 
     await query.edit_message_text(
         f"⚽ {pick['home']}\n"
@@ -1469,21 +2248,26 @@ async def handle_amount(
 
         return
 
-    balance = get_user_balance(user_id)
+    balance = get_user_balance(
+        user_id
+    )
 
     if stake > float(balance):
 
         await update.message.reply_text(
-            f"❌ Saldo insuficiente.\n\n"
+            "❌ Saldo insuficiente.\n\n"
             f"💰 Tu saldo: {balance}"
         )
 
         return
 
-    potential_return = stake * float(active["odds"])
+    potential_return = (
+        stake * float(active["odds"])
+    )
 
     event_name = (
-        f"{active['home']} vs {active['away']}"
+        f"{active['home']} vs "
+        f"{active['away']}"
     )
 
     with get_db_connection() as conn:
@@ -1498,6 +2282,8 @@ async def handle_amount(
                     event_name,
                     sport,
                     competition,
+                    home_team,
+                    away_team,
                     selection,
                     odds,
                     stake,
@@ -1516,6 +2302,8 @@ async def handle_amount(
                     %s,
                     %s,
                     %s,
+                    %s,
+                    %s,
                     %s
                 )
                 RETURNING id
@@ -1526,6 +2314,8 @@ async def handle_amount(
                     event_name,
                     "football",
                     active["sport_key"],
+                    active["home"],
+                    active["away"],
                     active["selection"],
                     active["odds"],
                     stake,
@@ -1535,7 +2325,9 @@ async def handle_amount(
 
             unconfirmed_id = cur.fetchone()[0]
 
-    pending_bets[f"unconfirmed:{user_id}"] = {
+    pending_bets[
+        f"unconfirmed:{user_id}"
+    ] = {
         "id": unconfirmed_id,
         **active,
         "stake": stake,
@@ -1546,13 +2338,17 @@ async def handle_amount(
         [
             InlineKeyboardButton(
                 "✅ Confirmar apuesta",
-                callback_data=f"confirm:{unconfirmed_id}",
+                callback_data=(
+                    f"confirm:{unconfirmed_id}"
+                ),
             )
         ],
         [
             InlineKeyboardButton(
                 "❌ Cancelar",
-                callback_data=f"cancel:{unconfirmed_id}",
+                callback_data=(
+                    f"cancel:{unconfirmed_id}"
+                ),
             )
         ],
     ]
@@ -1565,9 +2361,12 @@ async def handle_amount(
         f"🎯 Selección: {active['selection']}\n"
         f"📈 Cuota: {float(active['odds']):.2f}\n"
         f"💰 Apuesta: {stake}\n"
-        f"🏆 Posible retorno: {potential_return:.2f}\n\n"
+        f"🏆 Posible retorno: "
+        f"{potential_return:.2f}\n\n"
         "¿Deseas confirmar?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
@@ -1594,6 +2393,8 @@ async def confirm_bet(
                     ub.event_name,
                     ub.sport,
                     ub.competition,
+                    ub.home_team,
+                    ub.away_team,
                     ub.selection,
                     ub.odds,
                     ub.stake,
@@ -1629,6 +2430,8 @@ async def confirm_bet(
                 event_name,
                 sport,
                 competition,
+                home_team,
+                away_team,
                 selection,
                 odds,
                 stake,
@@ -1646,22 +2449,29 @@ async def confirm_bet(
                 return
 
             balance_before = balance
-            balance_after = balance - stake
+            balance_after = (
+                balance - stake
+            )
+
+            # ------------------------------------------------
+            # NUEVA APUESTA:
+            # VA A PENDING_BETS
+            # ------------------------------------------------
 
             cur.execute(
                 """
-                INSERT INTO bets (
+                INSERT INTO pending_bets (
                     user_id,
                     sport,
                     competition,
                     event_id,
-                    event_name,
-                    match_date,
+                    home_team,
+                    away_team,
                     selection,
                     odds,
                     stake,
                     potential_return,
-                    status
+                    expires_at
                 )
                 VALUES (
                     %s,
@@ -1669,12 +2479,12 @@ async def confirm_bet(
                     %s,
                     %s,
                     %s,
-                    NULL,
                     %s,
                     %s,
                     %s,
                     %s,
-                    'Pendiente'
+                    %s,
+                    NULL
                 )
                 RETURNING id
                 """,
@@ -1683,7 +2493,8 @@ async def confirm_bet(
                     sport,
                     competition,
                     event_id,
-                    event_name,
+                    home_team,
+                    away_team,
                     selection,
                     odds,
                     stake,
@@ -1691,7 +2502,13 @@ async def confirm_bet(
                 ),
             )
 
-            bet_id = cur.fetchone()[0]
+            pending_bet_id = (
+                cur.fetchone()[0]
+            )
+
+            # ------------------------------------------------
+            # DESCONTAR SALDO
+            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -1705,6 +2522,10 @@ async def confirm_bet(
                     db_user_id,
                 ),
             )
+
+            # ------------------------------------------------
+            # REGISTRAR APUESTA REALIZADA
+            # ------------------------------------------------
 
             cur.execute(
                 """
@@ -1731,6 +2552,10 @@ async def confirm_bet(
                 ),
             )
 
+            # ------------------------------------------------
+            # ELIMINAR UNCONFIRMED
+            # ------------------------------------------------
+
             cur.execute(
                 """
                 DELETE FROM unconfirmed_bets
@@ -1751,12 +2576,13 @@ async def confirm_bet(
 
     await query.edit_message_text(
         "✅ APUESTA CONFIRMADA\n\n"
-        f"🎟 Apuesta #{bet_id}\n\n"
+        f"🎟 Apuesta pendiente #{pending_bet_id}\n\n"
         f"⚽ {event_name}\n\n"
         f"🎯 Selección: {selection}\n"
         f"📈 Cuota: {float(odds):.2f}\n"
         f"💰 Apostado: {stake}\n"
-        f"🏆 Posible retorno: {float(potential_return):.2f}\n\n"
+        f"🏆 Posible retorno: "
+        f"{float(potential_return):.2f}\n\n"
         f"💳 Saldo restante: {balance_after}"
     )
 
@@ -1829,6 +2655,37 @@ async def show_bets(query):
 
         with conn.cursor() as cur:
 
+            # ------------------------------------------------
+            # APUESTAS PENDIENTES
+            # ------------------------------------------------
+
+            cur.execute(
+                """
+                SELECT
+                    pb.id,
+                    pb.home_team,
+                    pb.away_team,
+                    pb.selection,
+                    pb.odds,
+                    pb.stake,
+                    pb.potential_return,
+                    pb.created_at
+                FROM pending_bets pb
+                JOIN users u
+                    ON u.id = pb.user_id
+                WHERE u.telegram_id = %s
+                ORDER BY pb.created_at DESC
+                LIMIT 20
+                """,
+                (user_id,),
+            )
+
+            pending_rows = cur.fetchall()
+
+            # ------------------------------------------------
+            # HISTORIAL
+            # ------------------------------------------------
+
             cur.execute(
                 """
                 SELECT
@@ -1838,20 +2695,90 @@ async def show_bets(query):
                     b.odds,
                     b.stake,
                     b.potential_return,
-                    b.status
+                    b.status,
+                    b.created_at
                 FROM bets b
                 JOIN users u
                     ON u.id = b.user_id
                 WHERE u.telegram_id = %s
-                ORDER BY b.id DESC
+                ORDER BY b.created_at DESC
                 LIMIT 20
                 """,
                 (user_id,),
             )
 
-            rows = cur.fetchall()
+            settled_rows = cur.fetchall()
 
-    if not rows:
+    combined = []
+
+    for row in pending_rows:
+
+        (
+            bet_id,
+            home,
+            away,
+            selection,
+            odds,
+            stake,
+            potential_return,
+            created_at,
+        ) = row
+
+        combined.append(
+            (
+                created_at,
+                "pending",
+                (
+                    bet_id,
+                    f"{home} vs {away}",
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    "Pendiente",
+                ),
+            )
+        )
+
+    for row in settled_rows:
+
+        (
+            bet_id,
+            event_name,
+            selection,
+            odds,
+            stake,
+            potential_return,
+            status,
+            created_at,
+        ) = row
+
+        combined.append(
+            (
+                created_at,
+                "settled",
+                (
+                    bet_id,
+                    event_name,
+                    selection,
+                    odds,
+                    stake,
+                    potential_return,
+                    status,
+                ),
+            )
+        )
+
+    combined.sort(
+        key=lambda item: (
+            item[0] or datetime.min
+        ),
+        reverse=True,
+    )
+
+    combined = combined[:20]
+
+    if not combined:
 
         keyboard = [
             [
@@ -1864,14 +2791,20 @@ async def show_bets(query):
 
         await query.edit_message_text(
             "🎟 No tienes apuestas todavía.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
         return
 
     text = "🎟 MIS APUESTAS\n\n"
 
-    for row in rows:
+    for (
+        created_at,
+        source,
+        row,
+    ) in combined:
 
         (
             bet_id,
@@ -1884,18 +2817,30 @@ async def show_bets(query):
         ) = row
 
         if status == "Pendiente":
+
             icon = "⏳"
+            id_text = (
+                f"Apuesta pendiente #{bet_id}"
+            )
+
         elif status == "Ganada":
+
             icon = "✅"
+            id_text = f"Apuesta #{bet_id}"
+
         else:
+
             icon = "❌"
+            id_text = f"Apuesta #{bet_id}"
 
         text += (
-            f"{icon} Apuesta #{bet_id}\n"
+            f"{icon} {id_text}\n"
             f"⚽ {event_name}\n"
             f"🎯 {selection}\n"
             f"📈 Cuota: {odds}\n"
             f"💰 Monto: {stake}\n"
+            f"🏆 Posible retorno: "
+            f"{potential_return}\n"
             f"📌 Estado: {status}\n\n"
         )
 
@@ -1910,12 +2855,15 @@ async def show_bets(query):
 
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
 # ============================================================
-# PANEL DE ADMINISTRACIÓN
+# PANEL ADMIN
+# AGRUPADO POR PARTIDO
 # ============================================================
 
 async def show_admin_bets(query):
@@ -1936,20 +2884,16 @@ async def show_admin_bets(query):
             cur.execute(
                 """
                 SELECT
-                    b.id,
-                    u.username,
-                    u.telegram_id,
-                    b.event_name,
-                    b.selection,
-                    b.odds,
-                    b.stake,
-                    b.potential_return,
-                    b.status
-                FROM bets b
-                JOIN users u
-                    ON u.id = b.user_id
-                WHERE b.status = 'Pendiente'
-                ORDER BY b.id ASC
+                    event_id,
+                    MAX(home_team),
+                    MAX(away_team),
+                    MAX(competition),
+                    COUNT(*),
+                    COALESCE(SUM(stake), 0),
+                    MIN(created_at)
+                FROM pending_bets
+                GROUP BY event_id
+                ORDER BY MIN(created_at) ASC
                 """
             )
 
@@ -1974,8 +2918,10 @@ async def show_admin_bets(query):
 
         await query.edit_message_text(
             "⚙️ ADMINISTRACIÓN\n\n"
-            "✅ No hay apuestas pendientes de liquidación.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "✅ No hay partidos con apuestas pendientes.",
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
         return
@@ -1985,28 +2931,25 @@ async def show_admin_bets(query):
     for row in rows:
 
         (
-            bet_id,
-            username,
-            telegram_id,
-            event_name,
-            selection,
-            odds,
-            stake,
-            potential_return,
-            status,
+            event_id,
+            home_team,
+            away_team,
+            competition,
+            bet_count,
+            total_stake,
+            created_at,
         ) = row
-
-        display_user = (
-            f"@{username}"
-            if username
-            else str(telegram_id)
-        )
 
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    f"#{bet_id} • {display_user} • {stake}",
-                    callback_data=f"adminbet:{bet_id}",
+                    (
+                        f"⚽ {home_team} vs {away_team} "
+                        f"• 🎟 {bet_count}"
+                    ),
+                    callback_data=(
+                        f"adminevent:{event_id}"
+                    ),
                 )
             ]
         )
@@ -2031,17 +2974,23 @@ async def show_admin_bets(query):
 
     await query.edit_message_text(
         "⚙️ ADMINISTRACIÓN\n\n"
-        f"🎟 Apuestas pendientes: {len(rows)}\n\n"
-        "Selecciona una apuesta para ver sus detalles:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"🏟 Partidos pendientes: {len(rows)}\n\n"
+        "Cada partido aparece una sola vez.\n"
+        "Selecciona un partido para ver todas sus apuestas:",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
 # ============================================================
-# DETALLE DE APUESTA PARA ADMIN
+# DETALLE DE PARTIDO PARA ADMIN
 # ============================================================
 
-async def show_admin_bet(query, bet_id):
+async def show_admin_event(
+    query,
+    event_id,
+):
 
     if not is_admin(query.from_user.id):
 
@@ -2059,33 +3008,34 @@ async def show_admin_bet(query, bet_id):
             cur.execute(
                 """
                 SELECT
-                    b.id,
+                    pb.id,
                     u.username,
                     u.telegram_id,
-                    b.sport,
-                    b.competition,
-                    b.event_id,
-                    b.event_name,
-                    b.selection,
-                    b.odds,
-                    b.stake,
-                    b.potential_return,
-                    b.status,
-                    b.created_at
-                FROM bets b
+                    pb.sport,
+                    pb.competition,
+                    pb.event_id,
+                    pb.home_team,
+                    pb.away_team,
+                    pb.selection,
+                    pb.odds,
+                    pb.stake,
+                    pb.potential_return,
+                    pb.created_at
+                FROM pending_bets pb
                 JOIN users u
-                    ON u.id = b.user_id
-                WHERE b.id = %s
+                    ON u.id = pb.user_id
+                WHERE pb.event_id = %s
+                ORDER BY pb.id ASC
                 """,
-                (bet_id,),
+                (event_id,),
             )
 
-            row = cur.fetchone()
+            rows = cur.fetchall()
 
-    if not row:
+    if not rows:
 
         await query.edit_message_text(
-            "❌ La apuesta no existe.",
+            "❌ No hay apuestas pendientes para este partido.",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
@@ -2100,74 +3050,122 @@ async def show_admin_bet(query, bet_id):
 
         return
 
-    (
-        db_bet_id,
-        username,
-        telegram_id,
-        sport,
-        competition,
-        event_id,
-        event_name,
-        selection,
-        odds,
-        stake,
-        potential_return,
-        status,
-        created_at,
-    ) = row
+    first = rows[0]
 
-    display_user = (
-        f"@{username}"
-        if username
-        else str(telegram_id)
+    home_team = first[6]
+    away_team = first[7]
+    competition = first[4]
+
+    total_stake = sum(
+        float(row[10])
+        for row in rows
+    )
+
+    total_potential = sum(
+        float(row[11])
+        for row in rows
     )
 
     text = (
-        f"⚙️ APUESTA #{db_bet_id}\n\n"
-        f"👤 Usuario: {display_user}\n"
-        f"🆔 Telegram ID: {telegram_id}\n\n"
-        f"⚽ Partido: {event_name}\n"
-        f"🎯 Selección: {selection}\n"
-        f"📈 Cuota: {odds}\n"
-        f"💰 Apuesta: {stake}\n"
-        f"🏆 Posible retorno: {potential_return}\n"
-        f"📌 Estado: {status}\n"
-        f"🆔 Event ID: {event_id}\n"
+        "⚙️ PARTIDO PENDIENTE\n\n"
+        f"⚽ {home_team}\n"
+        f"vs\n"
+        f"⚽ {away_team}\n\n"
+        f"🏆 Competición: {competition}\n"
+        f"🆔 Event ID: {event_id}\n\n"
+        f"🎟 Apuestas: {len(rows)}\n"
+        f"💰 Total apostado: {total_stake:.2f}\n"
+        f"🏆 Retornos posibles: "
+        f"{total_potential:.2f}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
     )
 
-    keyboard = []
+    max_display = 25
 
-    if status == "Pendiente":
+    for index, row in enumerate(
+        rows[:max_display],
+        start=1,
+    ):
 
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "💰 LIQUIDAR APUESTA",
-                    callback_data=f"settle:{db_bet_id}",
-                )
-            ]
+        (
+            pending_id,
+            username,
+            telegram_id,
+            sport,
+            competition,
+            event_id,
+            home_team,
+            away_team,
+            selection,
+            odds,
+            stake,
+            potential_return,
+            created_at,
+        ) = row
+
+        display_user = (
+            f"@{username}"
+            if username
+            else str(telegram_id)
         )
 
-    keyboard.append(
+        text += (
+            f"\n{index}. 👤 {display_user}\n"
+            f"   🎟 #{pending_id}\n"
+            f"   🎯 {selection}\n"
+            f"   📈 Cuota: {odds}\n"
+            f"   💰 Apuesta: {stake}\n"
+            f"   🏆 Retorno: {potential_return}\n"
+        )
+
+    if len(rows) > max_display:
+
+        text += (
+            f"\n\n⚠️ Mostrando {max_display} "
+            f"de {len(rows)} apuestas."
+        )
+
+    keyboard = [
         [
             InlineKeyboardButton(
-                "⬅️ Volver a pendientes",
+                "💰 LIQUIDAR PARTIDO",
+                callback_data=(
+                    f"settleevent:{event_id}"
+                ),
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Actualizar",
+                callback_data=(
+                    f"adminevent:{event_id}"
+                ),
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "⬅️ Apuestas pendientes",
                 callback_data="admin",
             )
-        ]
-    )
+        ],
+    ]
 
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
 
 # ============================================================
-# LIQUIDACIÓN DESDE PANEL ADMIN
+# LIQUIDAR PARTIDO DESDE ADMIN
 # ============================================================
 
-async def admin_settle_bet(query, bet_id):
+async def admin_settle_event(
+    query,
+    event_id,
+):
 
     if not is_admin(query.from_user.id):
 
@@ -2179,61 +3177,312 @@ async def admin_settle_bet(query, bet_id):
         return
 
     await query.edit_message_text(
-        f"⏳ Liquidando apuesta #{bet_id}..."
+        "⏳ Consultando resultado del partido...\n\n"
+        "Esto hará una sola consulta a The Odds API "
+        "y procesará todas las apuestas del evento."
     )
 
-    result = settle_bet(bet_id)
+    try:
+
+        result = settle_event(
+            event_id
+        )
+
+    except requests.exceptions.HTTPError as e:
+
+        response = getattr(
+            e,
+            "response",
+            None,
+        )
+
+        if response is not None:
+
+            try:
+
+                error_data = response.json()
+
+                error_message = error_data.get(
+                    "message",
+                    response.text,
+                )
+
+            except Exception:
+
+                error_message = response.text
+
+            message = (
+                "❌ Error de The Odds API\n\n"
+                f"{error_message}"
+            )
+
+        else:
+
+            message = (
+                "❌ Error consultando "
+                f"The Odds API:\n{e}"
+            )
+
+        await query.edit_message_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Administración",
+                            callback_data="admin",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
+    except Exception as e:
+
+        await query.edit_message_text(
+            f"❌ Error liquidando el partido:\n{e}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Administración",
+                            callback_data="admin",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
 
     if not result["success"]:
 
-        keyboard = [
+        keyboard = []
+
+        if not result.get(
+            "already_processed",
+            False,
+        ):
+
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        "🔄 Volver a intentar",
+                        callback_data=(
+                            f"adminevent:{event_id}"
+                        ),
+                    )
+                ]
+            )
+
+        keyboard.append(
             [
                 InlineKeyboardButton(
-                    "🔄 Volver a intentar",
-                    callback_data=f"adminbet:{bet_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Apuestas pendientes",
+                    "⬅️ Administración",
                     callback_data="admin",
                 )
-            ],
-        ]
+            ]
+        )
 
         await query.edit_message_text(
-            f"⚠️ NO SE PUDO LIQUIDAR\n\n"
-            f"🎟 Apuesta #{bet_id}\n\n"
+            "⚠️ NO SE PUDO LIQUIDAR\n\n"
             f"{result['message']}",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(
+                keyboard
+            ),
         )
 
         return
 
     event = result["event"]
 
-    home_team = event.get(
-        "home_team",
-        "Local",
+    (
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+    ) = get_event_score_text(event)
+
+    result_name = result["result"]
+
+    text = (
+        "✅ PARTIDO LIQUIDADO\n\n"
+        f"⚽ {home_team}\n"
+        "vs\n"
+        f"⚽ {away_team}\n\n"
+        "📊 MARCADOR\n"
+        f"• {home_team}: {home_score}\n"
+        f"• {away_team}: {away_score}\n\n"
+        f"🏆 Resultado: {result_name}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 RESUMEN\n"
+        f"🎟 Apuestas procesadas: "
+        f"{result['total_bets']}\n"
+        f"✅ Ganadas: {result['won_count']}\n"
+        f"❌ Perdidas: {result['lost_count']}\n"
+        f"💰 Total apostado: "
+        f"{result['total_stake']}\n"
+        f"🏆 Premios pagados: "
+        f"{result['total_paid']}\n"
+        f"👤 Usuarios afectados: "
+        f"{result['users_affected']}\n\n"
+        "Todas las apuestas fueron movidas "
+        "a `bets` como historial."
     )
 
-    away_team = event.get(
-        "away_team",
-        "Visitante",
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "⚙️ Ver partidos pendientes",
+                callback_data="admin",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏠 Inicio",
+                callback_data="home",
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
     )
 
-    scores = event.get("scores", [])
 
-    home_score = "?"
-    away_score = "?"
+# ============================================================
+# COMPATIBILIDAD CON BOTONES ADMIN ANTIGUOS
+# ============================================================
 
-    for score in scores:
+async def show_admin_bet(
+    query,
+    bet_id,
+):
 
-        if score.get("name") == home_team:
-            home_score = score.get("score")
+    if not is_admin(query.from_user.id):
 
-        elif score.get("name") == away_team:
-            away_score = score.get("score")
+        await query.answer(
+            "⛔ No tienes permisos.",
+            show_alert=True,
+        )
+
+        return
+
+    with get_db_connection() as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT event_id
+                FROM pending_bets
+                WHERE id = %s
+                """,
+                (bet_id,),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+
+        await query.edit_message_text(
+            "❌ Esa apuesta ya no está pendiente.",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Administración",
+                            callback_data="admin",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
+    await show_admin_event(
+        query,
+        row[0],
+    )
+
+
+async def admin_settle_bet(
+    query,
+    bet_id,
+):
+
+    if not is_admin(query.from_user.id):
+
+        await query.answer(
+            "⛔ No tienes permisos.",
+            show_alert=True,
+        )
+
+        return
+
+    # El botón antiguo termina usando el mecanismo
+    # individual de respaldo.
+    await query.edit_message_text(
+        f"⏳ Liquidando apuesta pendiente #{bet_id}..."
+    )
+
+    try:
+
+        result = settle_bet(
+            bet_id
+        )
+
+    except Exception as e:
+
+        await query.edit_message_text(
+            f"❌ Error:\n{e}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Administración",
+                            callback_data="admin",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
+    if not result["success"]:
+
+        await query.edit_message_text(
+            f"⚠️ No se pudo liquidar.\n\n"
+            f"{result['message']}",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "⬅️ Administración",
+                            callback_data="admin",
+                        )
+                    ]
+                ]
+            ),
+        )
+
+        return
+
+    event = result["event"]
+
+    (
+        home_team,
+        away_team,
+        home_score,
+        away_score,
+    ) = get_event_score_text(event)
 
     if result["won"]:
 
@@ -2247,8 +3496,10 @@ async def admin_settle_bet(query, bet_id):
             f"• {home_team}: {home_score}\n"
             f"• {away_team}: {away_score}\n\n"
             "🏆 Resultado: GANADA\n\n"
-            f"💰 Premio pagado: {result['potential_return']}\n"
-            f"💳 Nuevo saldo del usuario: {result['balance']}"
+            f"💰 Premio pagado: "
+            f"{result['potential_return']}\n"
+            f"💳 Nuevo saldo: "
+            f"{result['balance']}"
         )
 
     else:
@@ -2263,27 +3514,28 @@ async def admin_settle_bet(query, bet_id):
             f"• {home_team}: {home_score}\n"
             f"• {away_team}: {away_score}\n\n"
             "🏆 Resultado: PERDIDA\n\n"
-            f"💳 Saldo del usuario: {result['balance']}"
+            f"💳 Saldo del usuario: "
+            f"{result['balance']}"
         )
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "⚙️ Ver apuestas pendientes",
-                callback_data="admin",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🏠 Inicio",
-                callback_data="home",
-            )
-        ],
-    ]
 
     await query.edit_message_text(
         text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⚙️ Ver partidos pendientes",
+                        callback_data="admin",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🏠 Inicio",
+                        callback_data="home",
+                    )
+                ],
+            ]
+        ),
     )
 
 
@@ -2399,12 +3651,72 @@ async def button(
         return
 
     # --------------------------------------------------------
-    # DETALLE ADMIN
+    # EVENTO ADMIN
+    # --------------------------------------------------------
+
+    if data.startswith("adminevent:"):
+
+        if not is_admin(
+            query.from_user.id
+        ):
+
+            await query.answer(
+                "⛔ No tienes permisos.",
+                show_alert=True,
+            )
+
+            return
+
+        event_id = data.split(
+            ":",
+            1,
+        )[1]
+
+        await show_admin_event(
+            query,
+            event_id,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # LIQUIDAR EVENTO ADMIN
+    # --------------------------------------------------------
+
+    if data.startswith("settleevent:"):
+
+        if not is_admin(
+            query.from_user.id
+        ):
+
+            await query.answer(
+                "⛔ No tienes permisos.",
+                show_alert=True,
+            )
+
+            return
+
+        event_id = data.split(
+            ":",
+            1,
+        )[1]
+
+        await admin_settle_event(
+            query,
+            event_id,
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # COMPATIBILIDAD: APUESTA ADMIN ANTIGUA
     # --------------------------------------------------------
 
     if data.startswith("adminbet:"):
 
-        if not is_admin(query.from_user.id):
+        if not is_admin(
+            query.from_user.id
+        ):
 
             await query.answer(
                 "⛔ No tienes permisos.",
@@ -2416,7 +3728,10 @@ async def button(
         try:
 
             bet_id = int(
-                data.split(":", 1)[1]
+                data.split(
+                    ":",
+                    1,
+                )[1]
             )
 
         except ValueError:
@@ -2435,12 +3750,14 @@ async def button(
         return
 
     # --------------------------------------------------------
-    # LIQUIDAR ADMIN
+    # COMPATIBILIDAD: LIQUIDAR APUESTA ANTIGUA
     # --------------------------------------------------------
 
     if data.startswith("settle:"):
 
-        if not is_admin(query.from_user.id):
+        if not is_admin(
+            query.from_user.id
+        ):
 
             await query.answer(
                 "⛔ No tienes permisos.",
@@ -2452,7 +3769,10 @@ async def button(
         try:
 
             bet_id = int(
-                data.split(":", 1)[1]
+                data.split(
+                    ":",
+                    1,
+                )[1]
             )
 
         except ValueError:
@@ -2479,7 +3799,10 @@ async def button(
         try:
 
             unconfirmed_id = int(
-                data.split(":", 1)[1]
+                data.split(
+                    ":",
+                    1,
+                )[1]
             )
 
         except ValueError:
@@ -2506,7 +3829,10 @@ async def button(
         try:
 
             unconfirmed_id = int(
-                data.split(":", 1)[1]
+                data.split(
+                    ":",
+                    1,
+                )[1]
             )
 
         except ValueError:
@@ -2548,7 +3874,10 @@ async def button(
 
     if data.startswith("game:"):
 
-        parts = data.split(":", 2)
+        parts = data.split(
+            ":",
+            2,
+        )
 
         if len(parts) != 3:
 
