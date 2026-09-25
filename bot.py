@@ -86,6 +86,66 @@ def init_db():
                 )
             """)
 
+                        # ========================================================
+            # MIGRACIÓN DE LA TABLA BETS
+            # ========================================================
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS event_id TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS event_name TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS sport TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS competition TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS selection TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS odds NUMERIC
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS stake NUMERIC
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS potential_return NUMERIC
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS result TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS status TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE bets
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
+                DEFAULT CURRENT_TIMESTAMP
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
                     id SERIAL PRIMARY KEY,
