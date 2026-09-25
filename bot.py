@@ -46,18 +46,6 @@ async def telegram_error_handler(
     update: object,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    """
-    Evita que el bot se detenga cuando Telegram devuelve:
-
-        BadRequest: Message is not modified
-
-    Esto ocurre cuando intentamos editar un mensaje con exactamente
-    el mismo texto y/o teclado que ya tiene.
-
-    El error es ignorado porque no afecta la lógica del bot.
-    Los demás errores se muestran en los logs.
-    """
-
     error = context.error
 
     if isinstance(error, BadRequest):
@@ -117,13 +105,8 @@ def parse_event_datetime(value):
 
 def migrate_legacy_pending_bets():
     """
-    Migra las apuestas que pertenecían al sistema anterior y que
-    todavía están guardadas en bets con estado Pendiente.
-
-    Esto evita perder apuestas pendientes después del cambio
-    hacia la nueva arquitectura:
-        pending_bets -> apuestas pendientes
-        bets         -> historial liquidado
+    Migra apuestas pendientes que todavía estén en bets
+    desde la arquitectura anterior hacia pending_bets.
     """
 
     migrated = 0
@@ -258,9 +241,11 @@ def migrate_legacy_pending_bets():
                 removed += 1
 
     if migrated or removed:
+
         print(
             "MIGRACION APUESTAS PENDIENTES: "
-            f"migradas={migrated}, eliminadas_de_bets={removed}"
+            f"migradas={migrated}, "
+            f"eliminadas_de_bets={removed}"
         )
 
 
@@ -554,10 +539,114 @@ def get_event_odds(sport_key, event_id):
 
 
 # ============================================================
+# UTILIDADES PARA BUSCAR PARTIDOS
+# ============================================================
+
+def normalize_team_name(name):
+    """
+    Normaliza nombres de equipos para poder comparar
+    el nombre guardado en Neon con el que devuelve
+    The Odds API.
+
+    Ejemplo:
+
+        "España"
+        "  España  "
+
+    terminan siendo comparables.
+    """
+
+    if not name:
+        return ""
+
+    return " ".join(
+        str(name).strip().casefold().split()
+    )
+
+
+def teams_match(
+    home_a,
+    away_a,
+    home_b,
+    away_b,
+):
+    """
+    Compara local y visitante respetando sus posiciones.
+    """
+
+    return (
+        normalize_team_name(home_a)
+        == normalize_team_name(home_b)
+        and
+        normalize_team_name(away_a)
+        == normalize_team_name(away_b)
+    )
+
+
+# ============================================================
 # RESULTADOS
 # ============================================================
 
-def get_event_result(sport_key, event_id):
+def get_recent_completed_events(sport_key):
+
+    url = (
+        f"https://api.the-odds-api.com/v4/"
+        f"sports/{sport_key}/scores/"
+    )
+
+    print("========================================")
+    print("SCORES FALLBACK REQUEST")
+    print("SPORT:", sport_key)
+    print("PARAMS: daysFrom=3")
+    print("========================================")
+
+    response = requests.get(
+        url,
+        params={
+            "apiKey": ODDS_API_KEY,
+            "daysFrom": 3,
+        },
+        timeout=30,
+    )
+
+    print(
+        "SCORES FALLBACK STATUS:",
+        response.status_code,
+    )
+
+    print(
+        "SCORES FALLBACK RESPONSE:",
+        response.text[:5000],
+    )
+
+    response.raise_for_status()
+
+    return response.json()
+
+
+def get_event_result(
+    sport_key,
+    event_id,
+    home_team=None,
+    away_team=None,
+):
+    """
+    Obtiene el resultado de un partido.
+
+    PRIMERA CONSULTA:
+        /scores/?eventIds=EVENT_ID
+
+    Si The Odds API no devuelve el evento, se realiza
+    UNA SOLA consulta de respaldo:
+
+        /scores/?daysFrom=3
+
+    y se busca por home_team + away_team.
+
+    Esto permite liquidar apuestas cuando el event_id
+    original ya no aparece directamente en la respuesta
+    filtrada.
+    """
 
     url = (
         f"https://api.the-odds-api.com/v4/"
@@ -570,14 +659,18 @@ def get_event_result(sport_key, event_id):
         "eventIds": event_id,
     }
 
-    # --------------------------------------------------------
-    # LOG DE DIAGNÓSTICO
-    # --------------------------------------------------------
-
     print("========================================")
     print("SCORES REQUEST")
     print("SPORT:", sport_key)
     print("EVENT ID:", event_id)
+    print(
+        "HOME TEAM:",
+        home_team,
+    )
+    print(
+        "AWAY TEAM:",
+        away_team,
+    )
     print(
         "PARAMS: daysFrom=3 eventIds=",
         event_id,
@@ -610,60 +703,113 @@ def get_event_result(sport_key, event_id):
         response.text[:5000],
     )
 
-    print("========================================")
-
     response.raise_for_status()
 
     data = response.json()
 
-    for event in data:
+    if data:
 
-        if event.get("id") == event_id:
+        for event in data:
 
-            print(
-                "SCORES MATCH FOUND:",
-                event_id,
-            )
+            if event.get("id") == event_id:
 
-            print(
-                "SCORES COMPLETED:",
-                event.get("completed"),
-            )
+                print(
+                    "SCORES MATCH FOUND BY EVENT ID:",
+                    event_id,
+                )
 
-            print(
-                "SCORES DATA:",
-                event.get("scores"),
-            )
+                print(
+                    "SCORES COMPLETED:",
+                    event.get("completed"),
+                )
 
-            return event
+                print(
+                    "SCORES DATA:",
+                    event.get("scores"),
+                )
+
+                return event
 
     print(
         "SCORES EVENT NOT FOUND IN RESPONSE:",
         event_id,
     )
 
+    # --------------------------------------------------------
+    # FALLBACK POR EQUIPOS
+    # --------------------------------------------------------
+
+    if not home_team or not away_team:
+
+        print(
+            "SCORES FALLBACK SKIPPED: "
+            "no hay equipos disponibles."
+        )
+
+        return None
+
+    print(
+        "SCORES FALLBACK: buscando por equipos..."
+    )
+
+    fallback_events = get_recent_completed_events(
+        sport_key
+    )
+
+    for event in fallback_events:
+
+        api_home = event.get("home_team")
+        api_away = event.get("away_team")
+
+        if teams_match(
+            home_team,
+            away_team,
+            api_home,
+            api_away,
+        ):
+
+            print(
+                "SCORES FALLBACK MATCH FOUND"
+            )
+
+            print(
+                "ORIGINAL EVENT ID:",
+                event_id,
+            )
+
+            print(
+                "FOUND EVENT ID:",
+                event.get("id"),
+            )
+
+            print(
+                "HOME:",
+                api_home,
+            )
+
+            print(
+                "AWAY:",
+                api_away,
+            )
+
+            print(
+                "COMPLETED:",
+                event.get("completed"),
+            )
+
+            print(
+                "SCORES:",
+                event.get("scores"),
+            )
+
+            return event
+
+    print(
+        "SCORES FALLBACK: "
+        "PARTIDO NO ENCONTRADO POR EQUIPOS."
+    )
+
     return None
-
-
-def get_recent_completed_events(sport_key):
-
-    url = (
-        f"https://api.the-odds-api.com/v4/"
-        f"sports/{sport_key}/scores/"
-    )
-
-    response = requests.get(
-        url,
-        params={
-            "apiKey": ODDS_API_KEY,
-            "daysFrom": 3,
-        },
-        timeout=30,
-    )
-
-    response.raise_for_status()
-
-    return response.json()
 
 
 # ============================================================
@@ -688,15 +834,31 @@ def determine_h2h_result(event):
         if score.get("name") == home_team:
 
             try:
-                home_score = int(score.get("score"))
-            except (TypeError, ValueError):
+
+                home_score = int(
+                    score.get("score")
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
                 return None
 
         elif score.get("name") == away_team:
 
             try:
-                away_score = int(score.get("score"))
-            except (TypeError, ValueError):
+
+                away_score = int(
+                    score.get("score")
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+
                 return None
 
     if home_score is None or away_score is None:
@@ -711,9 +873,14 @@ def determine_h2h_result(event):
     return "Draw"
 
 
-def evaluate_h2h_selection(event, selection):
+def evaluate_h2h_selection(
+    event,
+    selection,
+):
 
-    result = determine_h2h_result(event)
+    result = determine_h2h_result(
+        event
+    )
 
     if result is None:
         return None
@@ -745,10 +912,16 @@ def get_event_score_text(event):
     for score in scores:
 
         if score.get("name") == home_team:
-            home_score = score.get("score")
+
+            home_score = score.get(
+                "score"
+            )
 
         elif score.get("name") == away_team:
-            away_score = score.get("score")
+
+            away_score = score.get(
+                "score"
+            )
 
     return (
         home_team,
@@ -762,9 +935,15 @@ def get_event_score_text(event):
 # LIQUIDACIÓN DE FILAS PENDIENTES
 # ============================================================
 
-def _settle_pending_rows(cur, rows, event):
+def _settle_pending_rows(
+    cur,
+    rows,
+    event,
+):
 
-    result = determine_h2h_result(event)
+    result = determine_h2h_result(
+        event
+    )
 
     if result is None:
         return None
@@ -807,7 +986,9 @@ def _settle_pending_rows(cur, rows, event):
 
     results = []
 
-    for user_id in sorted(users_bets.keys()):
+    for user_id in sorted(
+        users_bets.keys()
+    ):
 
         cur.execute(
             """
@@ -822,6 +1003,7 @@ def _settle_pending_rows(cur, rows, event):
         user_row = cur.fetchone()
 
         if not user_row:
+
             raise ValueError(
                 f"Usuario {user_id} no encontrado."
             )
@@ -986,8 +1168,11 @@ def _settle_pending_rows(cur, rows, event):
         )
 
         if current_balance != starting_balance:
+
             users_affected += 1
+
         elif user_had_win:
+
             users_affected += 1
 
     return {
@@ -1051,11 +1236,36 @@ def settle_event(event_id):
             ),
         }
 
-    sport_key = preview_rows[0][3]
+    # --------------------------------------------------------
+    # IMPORTANTE:
+    # row[2] = sport
+    # row[3] = competition
+    #
+    # Antes estaba usando row[3], lo cual era incorrecto.
+    # --------------------------------------------------------
+
+    sport_key = preview_rows[0][2]
+
+    home_team = preview_rows[0][5]
+    away_team = preview_rows[0][6]
+
+    print(
+        "SETTLE EVENT SPORT KEY:",
+        sport_key,
+    )
+
+    print(
+        "SETTLE EVENT TEAMS:",
+        home_team,
+        "vs",
+        away_team,
+    )
 
     event = get_event_result(
         sport_key,
         event_id,
+        home_team,
+        away_team,
     )
 
     if not event:
@@ -1064,7 +1274,8 @@ def settle_event(event_id):
             "success": False,
             "message": (
                 "El resultado todavía no está disponible "
-                "en The Odds API."
+                "en The Odds API y tampoco se encontró "
+                "el partido por los equipos."
             ),
         }
 
@@ -1076,7 +1287,9 @@ def settle_event(event_id):
             "event": event,
         }
 
-    result = determine_h2h_result(event)
+    result = determine_h2h_result(
+        event
+    )
 
     if result is None:
 
@@ -1089,7 +1302,9 @@ def settle_event(event_id):
             "event": event,
         }
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
 
         with conn.cursor() as cur:
 
@@ -1145,7 +1360,6 @@ def settle_event(event_id):
 
 # ============================================================
 # LIQUIDAR UNA SOLA APUESTA
-# RESPALDO /LIQUIDAR
 # ============================================================
 
 def settle_bet(bet_id):
@@ -1212,12 +1426,47 @@ def settle_bet(bet_id):
             "message": "La apuesta no existe.",
         }
 
-    sport_key = pending_row[3]
+    # --------------------------------------------------------
+    # CORRECCIÓN IMPORTANTE
+    #
+    # pending_row:
+    #
+    # [0] id
+    # [1] user_id
+    # [2] sport
+    # [3] competition
+    # [4] event_id
+    # [5] home_team
+    # [6] away_team
+    # --------------------------------------------------------
+
+    sport_key = pending_row[2]
     event_id = pending_row[4]
+    home_team = pending_row[5]
+    away_team = pending_row[6]
+
+    print(
+        "SETTLE BET SPORT KEY:",
+        sport_key,
+    )
+
+    print(
+        "SETTLE BET EVENT ID:",
+        event_id,
+    )
+
+    print(
+        "SETTLE BET TEAMS:",
+        home_team,
+        "vs",
+        away_team,
+    )
 
     event = get_event_result(
         sport_key,
         event_id,
+        home_team,
+        away_team,
     )
 
     if not event:
@@ -1226,7 +1475,8 @@ def settle_bet(bet_id):
             "success": False,
             "message": (
                 "El resultado todavía no está disponible "
-                "en The Odds API."
+                "en The Odds API y tampoco se encontró "
+                "el partido por los equipos."
             ),
         }
 
@@ -1247,7 +1497,9 @@ def settle_bet(bet_id):
             ),
         }
 
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(
+        DATABASE_URL
+    ) as conn:
 
         with conn.cursor() as cur:
 
@@ -1293,7 +1545,9 @@ def settle_bet(bet_id):
                 event,
             )
 
-            result_data = summary["results"][0]
+            result_data = summary[
+                "results"
+            ][0]
 
     return {
         "success": True,
@@ -1301,7 +1555,9 @@ def settle_bet(bet_id):
         "status": result_data["status"],
         "event": event,
         "result": summary["result"],
-        "balance": result_data["balance_after"],
+        "balance": result_data[
+            "balance_after"
+        ],
         "potential_return": result_data[
             "potential_return"
         ],
@@ -1320,7 +1576,9 @@ async def test_settle(
 
     telegram_user = update.effective_user
 
-    if not is_admin(telegram_user.id):
+    if not is_admin(
+        telegram_user.id
+    ):
 
         await update.message.reply_text(
             "⛔ No tienes permisos para utilizar esta función."
@@ -1338,7 +1596,9 @@ async def test_settle(
 
     try:
 
-        bet_id = int(context.args[0])
+        bet_id = int(
+            context.args[0]
+        )
 
     except ValueError:
 
@@ -1354,9 +1614,16 @@ async def test_settle(
 
     try:
 
-        result = settle_bet(bet_id)
+        result = settle_bet(
+            bet_id
+        )
 
     except Exception as e:
+
+        print(
+            "ERROR /LIQUIDAR:",
+            repr(e),
+        )
 
         await update.message.reply_text(
             f"❌ Error liquidando la apuesta:\n{e}"
@@ -1379,7 +1646,9 @@ async def test_settle(
         away_team,
         home_score,
         away_score,
-    ) = get_event_score_text(event)
+    ) = get_event_score_text(
+        event
+    )
 
     if result["won"]:
 
@@ -1412,7 +1681,9 @@ async def test_settle(
             f"💳 Saldo actual: {result['balance']}"
         )
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(
+        message
+    )
 
 
 # ============================================================
@@ -1460,10 +1731,17 @@ async def test_recent_results(
 
     for event in events[:15]:
 
-        home = event.get("home_team")
-        away = event.get("away_team")
+        home = event.get(
+            "home_team"
+        )
 
-        scores = event.get("scores") or []
+        away = event.get(
+            "away_team"
+        )
+
+        scores = event.get(
+            "scores"
+        ) or []
 
         score_text = "Sin marcador"
 
@@ -1472,6 +1750,7 @@ async def test_recent_results(
             score_map = {}
 
             for score in scores:
+
                 score_map[
                     score.get("name")
                 ] = score.get("score")
@@ -1488,7 +1767,9 @@ async def test_recent_results(
             f"🆔 {event.get('id')}\n\n"
         )
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text
+    )
 
 
 # ============================================================
@@ -1542,7 +1823,9 @@ async def test_result(
         f"🏁 Completado: {event.get('completed')}\n\n"
     )
 
-    scores = event.get("scores")
+    scores = event.get(
+        "scores"
+    )
 
     if scores:
 
@@ -1559,7 +1842,9 @@ async def test_result(
 
         text += "📊 Marcador no disponible."
 
-    await update.message.reply_text(text)
+    await update.message.reply_text(
+        text
+    )
 
 
 # ============================================================
@@ -1581,7 +1866,9 @@ async def test_evaluate(
 
     sport_key = context.args[0]
     event_id = context.args[1]
-    selection = " ".join(context.args[2:])
+    selection = " ".join(
+        context.args[2:]
+    )
 
     try:
 
@@ -1675,7 +1962,9 @@ def home_keyboard(user_id=None):
             ]
         )
 
-    return InlineKeyboardMarkup(keyboard)
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 # ============================================================
@@ -1689,7 +1978,9 @@ async def start(
 
     telegram_user = update.effective_user
 
-    get_or_create_user(telegram_user)
+    get_or_create_user(
+        telegram_user
+    )
 
     await update.message.reply_text(
         "🏆 CUBA SPORTS\n\n"
@@ -1776,15 +2067,24 @@ async def show_sports(query):
 # MOSTRAR PARTIDOS
 # ============================================================
 
-async def show_games(query, sport_key):
+async def show_games(
+    query,
+    sport_key,
+):
 
     try:
 
-        events = get_odds(sport_key)
+        events = get_odds(
+            sport_key
+        )
 
     except requests.exceptions.HTTPError as e:
 
-        response = getattr(e, "response", None)
+        response = getattr(
+            e,
+            "response",
+            None,
+        )
 
         if response is not None:
 
@@ -1868,7 +2168,9 @@ async def show_games(query, sport_key):
 
     for event in events[:15]:
 
-        event_id = event.get("id")
+        event_id = event.get(
+            "id"
+        )
 
         home = event.get(
             "home_team",
@@ -1931,7 +2233,11 @@ async def show_game(
 
     except requests.exceptions.HTTPError as e:
 
-        response = getattr(e, "response", None)
+        response = getattr(
+            e,
+            "response",
+            None,
+        )
 
         if response is not None:
 
@@ -2070,8 +2376,13 @@ async def show_game(
                 []
             ):
 
-                name = outcome.get("name")
-                price = outcome.get("price")
+                name = outcome.get(
+                    "name"
+                )
+
+                price = outcome.get(
+                    "price"
+                )
 
                 if (
                     name is None
@@ -2080,18 +2391,23 @@ async def show_game(
                     continue
 
                 try:
-                    price = float(price)
+
+                    price = float(
+                        price
+                    )
 
                 except (
                     TypeError,
                     ValueError,
                 ):
+
                     continue
 
                 if (
                     name not in outcomes
                     or price > outcomes[name]
                 ):
+
                     outcomes[name] = price
 
     # --------------------------------------------------------
@@ -2218,7 +2534,9 @@ async def ask_amount(
 
     user_id = query.from_user.id
 
-    pick = pending_bets.get(pick_id)
+    pick = pending_bets.get(
+        pick_id
+    )
 
     if not pick:
 
@@ -2270,7 +2588,9 @@ async def handle_amount(
 
     try:
 
-        stake = float(text)
+        stake = float(
+            text
+        )
 
     except ValueError:
 
@@ -2303,7 +2623,9 @@ async def handle_amount(
         return
 
     potential_return = (
-        stake * float(active["odds"])
+        stake * float(
+            active["odds"]
+        )
     )
 
     event_name = (
@@ -2364,7 +2686,9 @@ async def handle_amount(
                 ),
             )
 
-            unconfirmed_id = cur.fetchone()[0]
+            unconfirmed_id = (
+                cur.fetchone()[0]
+            )
 
     pending_bets[
         f"unconfirmed:{user_id}"
@@ -2490,6 +2814,7 @@ async def confirm_bet(
                 return
 
             balance_before = balance
+
             balance_after = (
                 balance - stake
             )
@@ -2835,6 +3160,7 @@ async def show_bets(query):
         if status == "Pendiente":
 
             icon = "⏳"
+
             id_text = (
                 f"Apuesta pendiente #{bet_id}"
             )
@@ -2879,12 +3205,13 @@ async def show_bets(query):
 
 # ============================================================
 # PANEL ADMIN
-# AGRUPADO POR PARTIDO
 # ============================================================
 
 async def show_admin_bets(query):
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(
+        query.from_user.id
+    ):
 
         await query.answer(
             "⛔ No tienes permisos.",
@@ -3008,7 +3335,9 @@ async def show_admin_event(
     event_id,
 ):
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(
+        query.from_user.id
+    ):
 
         await query.answer(
             "⛔ No tienes permisos.",
@@ -3183,7 +3512,9 @@ async def admin_settle_event(
     event_id,
 ):
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(
+        query.from_user.id
+    ):
 
         await query.answer(
             "⛔ No tienes permisos.",
@@ -3194,8 +3525,9 @@ async def admin_settle_event(
 
     await query.edit_message_text(
         "⏳ Consultando resultado del partido...\n\n"
-        "Esto hará una sola consulta a The Odds API "
-        "y procesará todas las apuestas del evento."
+        "Se consultará The Odds API y, si el "
+        "event_id ya no aparece directamente, "
+        "se buscará el partido por sus equipos."
     )
 
     try:
@@ -3319,7 +3651,9 @@ async def admin_settle_event(
         away_team,
         home_score,
         away_score,
-    ) = get_event_score_text(event)
+    ) = get_event_score_text(
+        event
+    )
 
     result_name = result["result"]
 
@@ -3380,7 +3714,9 @@ async def show_admin_bet(
     bet_id,
 ):
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(
+        query.from_user.id
+    ):
 
         await query.answer(
             "⛔ No tienes permisos.",
@@ -3433,7 +3769,9 @@ async def admin_settle_bet(
     bet_id,
 ):
 
-    if not is_admin(query.from_user.id):
+    if not is_admin(
+        query.from_user.id
+    ):
 
         await query.answer(
             "⛔ No tienes permisos.",
@@ -3496,7 +3834,9 @@ async def admin_settle_bet(
         away_team,
         home_score,
         away_score,
-    ) = get_event_score_text(event)
+    ) = get_event_score_text(
+        event
+    )
 
     if result["won"]:
 
@@ -3582,7 +3922,9 @@ async def button(
 
     if data == "football":
 
-        await show_sports(query)
+        await show_sports(
+            query
+        )
 
         return
 
@@ -3630,17 +3972,23 @@ async def button(
 
     if data == "mybets":
 
-        await show_bets(query)
+        await show_bets(
+            query
+        )
 
         return
 
     if data == "admin":
 
-        await show_admin_bets(query)
+        await show_admin_bets(
+            query
+        )
 
         return
 
-    if data.startswith("adminevent:"):
+    if data.startswith(
+        "adminevent:"
+    ):
 
         if not is_admin(
             query.from_user.id
@@ -3665,7 +4013,9 @@ async def button(
 
         return
 
-    if data.startswith("settleevent:"):
+    if data.startswith(
+        "settleevent:"
+    ):
 
         if not is_admin(
             query.from_user.id
@@ -3690,7 +4040,9 @@ async def button(
 
         return
 
-    if data.startswith("adminbet:"):
+    if data.startswith(
+        "adminbet:"
+    ):
 
         if not is_admin(
             query.from_user.id
@@ -3727,7 +4079,9 @@ async def button(
 
         return
 
-    if data.startswith("settle:"):
+    if data.startswith(
+        "settle:"
+    ):
 
         if not is_admin(
             query.from_user.id
@@ -3764,7 +4118,9 @@ async def button(
 
         return
 
-    if data.startswith("confirm:"):
+    if data.startswith(
+        "confirm:"
+    ):
 
         try:
 
@@ -3790,7 +4146,9 @@ async def button(
 
         return
 
-    if data.startswith("cancel:"):
+    if data.startswith(
+        "cancel:"
+    ):
 
         try:
 
@@ -3816,7 +4174,9 @@ async def button(
 
         return
 
-    if data.startswith("league:"):
+    if data.startswith(
+        "league:"
+    ):
 
         sport_key = data.split(
             ":",
@@ -3830,7 +4190,9 @@ async def button(
 
         return
 
-    if data.startswith("game:"):
+    if data.startswith(
+        "game:"
+    ):
 
         parts = data.split(
             ":",
@@ -3856,7 +4218,9 @@ async def button(
 
         return
 
-    if data.startswith("pick:"):
+    if data.startswith(
+        "pick:"
+    ):
 
         await ask_amount(
             query,
@@ -3897,10 +4261,6 @@ def main():
         .token(BOT_TOKEN)
         .build()
     )
-
-    # --------------------------------------------------------
-    # MANEJADOR GLOBAL DE ERRORES
-    # --------------------------------------------------------
 
     application.add_error_handler(
         telegram_error_handler
