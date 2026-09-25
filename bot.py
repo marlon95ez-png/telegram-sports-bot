@@ -2,7 +2,9 @@ import os
 import requests
 import psycopg
 from datetime import datetime
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -34,6 +36,47 @@ def is_admin(user_id):
         return False
 
     return str(user_id) == str(ADMIN_TELEGRAM_ID)
+
+
+# ============================================================
+# MANEJO DE ERRORES DE TELEGRAM
+# ============================================================
+
+async def telegram_error_handler(
+    update: object,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    """
+    Evita que el bot se detenga cuando Telegram devuelve:
+
+        BadRequest: Message is not modified
+
+    Esto ocurre cuando intentamos editar un mensaje con exactamente
+    el mismo texto y/o teclado que ya tiene.
+
+    El error es ignorado porque no afecta la lógica del bot.
+    Los demás errores se muestran en los logs.
+    """
+
+    error = context.error
+
+    if isinstance(error, BadRequest):
+
+        error_text = str(error).lower()
+
+        if "message is not modified" in error_text:
+
+            print(
+                "ℹ️ Telegram: el mensaje ya estaba actualizado. "
+                "Se ignora Message is not modified."
+            )
+
+            return
+
+    print(
+        "❌ ERROR NO CONTROLADO DE TELEGRAM:",
+        repr(error),
+    )
 
 
 # ============================================================
@@ -3853,6 +3896,14 @@ def main():
         Application.builder()
         .token(BOT_TOKEN)
         .build()
+    )
+
+    # --------------------------------------------------------
+    # MANEJADOR GLOBAL DE ERRORES
+    # --------------------------------------------------------
+
+    application.add_error_handler(
+        telegram_error_handler
     )
 
     application.add_handler(
