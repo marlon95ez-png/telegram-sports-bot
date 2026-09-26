@@ -151,6 +151,121 @@ def main_keyboard(user_id):
     keyboard = [
         [
             InlineKeyboardButton(
+                "⚽ Deportes",
+                callback_data="menu_sports",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🎫 Mis apuestas",
+                callback_data="menu_bets",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "💳 Mi saldo",
+                callback_data="menu_balance",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📜 Historial",
+                callback_data="menu_history",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "ℹ️ Ayuda",
+                callback_data="menu_help",
+            )
+        ],
+    ]
+
+    if is_admin(user_id):
+        keyboard.append([
+            InlineKeyboardButton(
+                "🛠 ADMIN - APUESTAS PENDIENTES",
+                callback_data="admin_bets",
+            )
+        ])
+
+    return keyboard
+
+
+async def show_main_menu(query):
+
+    _, balance = get_or_create_user(
+        query.from_user
+    )
+
+    await query.edit_message_text(
+        "🏆 CUBA SPORTS\n\n"
+        f"💰 Saldo: {format_money(balance)} créditos\n\n"
+        "Selecciona una opción:",
+        reply_markup=InlineKeyboardMarkup(
+            main_keyboard(query.from_user.id)
+        ),
+    )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not update.effective_user:
+        return
+
+    _, balance = get_or_create_user(
+        update.effective_user
+    )
+
+    await update.message.reply_text(
+        "🏆 CUBA SPORTS\n\n"
+        f"💰 Saldo: {format_money(balance)} créditos\n\n"
+        "Selecciona una opción:",
+        reply_markup=InlineKeyboardMarkup(
+            main_keyboard(update.effective_user.id)
+        ),
+    )
+
+
+# ============================================================
+# MENÚ DE DEPORTES
+# ============================================================
+
+async def show_sports_menu(query):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "⚽ Fútbol",
+                callback_data="menu_football",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Volver",
+                callback_data="back_main",
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        "⚽ DEPORTES\n\n"
+        "Selecciona un deporte:",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
+    )
+
+
+# ============================================================
+# MENÚ DE FÚTBOL
+# ============================================================
+
+async def show_football_menu(query):
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
                 "🇪🇸 LaLiga",
                 callback_data="sport:soccer_spain_la_liga",
             )
@@ -181,47 +296,225 @@ def main_keyboard(user_id):
         ],
         [
             InlineKeyboardButton(
-                "🏆 UEFA Nations League",
+                "🌍 UEFA Nations League",
                 callback_data="sport:soccer_uefa_nations_league",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Volver",
+                callback_data="menu_sports",
             )
         ],
     ]
 
-    if is_admin(user_id):
-        keyboard.append([
-            InlineKeyboardButton(
-                "🛠 ADMIN - APUESTAS PENDIENTES",
-                callback_data="admin_bets",
-            )
-        ])
-
-    return keyboard
-
-
-async def show_main_menu(query):
-
     await query.edit_message_text(
-        "🏆 CUBA SPORTS\n\n"
+        "⚽ FÚTBOL\n\n"
         "Selecciona una competición:",
         reply_markup=InlineKeyboardMarkup(
-            main_keyboard(query.from_user.id)
+            keyboard
         ),
     )
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# SECCIONES PREPARADAS
+# ============================================================
 
-    if not update.effective_user:
-        return
+async def show_bets_menu(query):
 
-    get_or_create_user(update.effective_user)
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "⏳ Pendientes",
+                callback_data="bets_pending",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🏆 Resultados",
+                callback_data="bets_results",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Volver",
+                callback_data="back_main",
+            )
+        ],
+    ]
 
-    await update.message.reply_text(
-        "🏆 CUBA SPORTS\n\n"
-        "Selecciona una competición:",
+    await query.edit_message_text(
+        "🎫 MIS APUESTAS\n\n"
+        "Selecciona una opción:",
         reply_markup=InlineKeyboardMarkup(
-            main_keyboard(update.effective_user.id)
+            keyboard
         ),
+    )
+
+
+async def show_balance_menu(query):
+
+    _, balance = get_or_create_user(
+        query.from_user
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "➕ Depositar",
+                callback_data="balance_deposit",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "➖ Retirar",
+                callback_data="balance_withdraw",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📜 Movimientos",
+                callback_data="balance_movements",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔙 Volver",
+                callback_data="back_main",
+            )
+        ],
+    ]
+
+    await query.edit_message_text(
+        "💳 MI SALDO\n\n"
+        f"💰 Saldo disponible:\n\n"
+        f"{format_money(balance)} créditos\n\n"
+        "Selecciona una opción:",
+        reply_markup=InlineKeyboardMarkup(
+            keyboard
+        ),
+    )
+
+
+async def show_history_menu(query):
+
+    await query.edit_message_text(
+        "📜 HISTORIAL\n\n"
+        "Esta sección será habilitada "
+        "en la siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="back_main",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_help_menu(query):
+
+    await query.edit_message_text(
+        "ℹ️ AYUDA\n\n"
+        "Esta sección será habilitada "
+        "más adelante.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="back_main",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_pending_bets_placeholder(query):
+
+    await query.edit_message_text(
+        "⏳ APUESTAS PENDIENTES\n\n"
+        "Esta sección será conectada con "
+        "las apuestas reales en la siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="menu_bets",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_results_bets_placeholder(query):
+
+    await query.edit_message_text(
+        "🏆 RESULTADOS\n\n"
+        "Esta sección será conectada con "
+        "el historial de apuestas liquidadas "
+        "en la siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="menu_bets",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_deposit_placeholder(query):
+
+    await query.edit_message_text(
+        "➕ DEPOSITAR\n\n"
+        "El sistema de depósitos será "
+        "implementado en una siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="menu_balance",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_withdraw_placeholder(query):
+
+    await query.edit_message_text(
+        "➖ RETIRAR\n\n"
+        "El sistema de retiros será "
+        "implementado en una siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="menu_balance",
+                )
+            ]
+        ]),
+    )
+
+
+async def show_movements_placeholder(query):
+
+    await query.edit_message_text(
+        "📜 MOVIMIENTOS\n\n"
+        "El historial de movimientos financieros "
+        "será conectado con la tabla "
+        "transactions en la siguiente fase.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔙 Volver",
+                    callback_data="menu_balance",
+                )
+            ]
+        ]),
     )
 
 
@@ -1003,10 +1296,6 @@ def prepare_bet_settlement(bet_id):
         settled_at,
     ) = row
 
-    # --------------------------------------------------------
-    # SEGURO CONTRA DOBLE LIQUIDACIÓN
-    # --------------------------------------------------------
-
     if status != STATUS_PENDING:
 
         return {
@@ -1192,13 +1481,6 @@ def settle_bet_transaction(
 
         with conn.cursor() as cur:
 
-            # ==================================================
-            # BLOQUEO DE LA APUESTA
-            #
-            # FOR UPDATE impide que dos procesos puedan
-            # liquidar la misma apuesta simultáneamente.
-            # ==================================================
-
             cur.execute(
                 """
                 SELECT
@@ -1241,10 +1523,6 @@ def settle_bet_transaction(
                 existing_result,
             ) = bet
 
-            # ==================================================
-            # SEGUNDO SEGURO CONTRA DOBLE LIQUIDACIÓN
-            # ==================================================
-
             if status != STATUS_PENDING:
 
                 return {
@@ -1258,10 +1536,6 @@ def settle_bet_transaction(
                         f"Estado: {status}"
                     ),
                 }
-
-            # ==================================================
-            # BLOQUEAR SALDO DEL USUARIO
-            # ==================================================
 
             cur.execute(
                 """
@@ -1288,10 +1562,6 @@ def settle_bet_transaction(
             current_balance = money(
                 user_row[0]
             )
-
-            # ==================================================
-            # DETERMINAR PREMIO
-            # ==================================================
 
             if expected_result == RESULT_WON:
 
@@ -1341,10 +1611,6 @@ def settle_bet_transaction(
                 transaction_amount = None
                 description = None
 
-            # ==================================================
-            # ACTUALIZAR SALDO
-            # ==================================================
-
             if new_balance != current_balance:
 
                 cur.execute(
@@ -1360,10 +1626,6 @@ def settle_bet_transaction(
                         user_id,
                     ),
                 )
-
-            # ==================================================
-            # REGISTRAR TRANSACCIÓN DE PREMIO
-            # ==================================================
 
             if transaction_type:
 
@@ -1399,12 +1661,6 @@ def settle_bet_transaction(
                     ),
                 )
 
-            # ==================================================
-            # MARCAR APUESTA COMO LIQUIDADA
-            #
-            # La condición status = pending es otra protección.
-            # ==================================================
-
             cur.execute(
                 """
                 UPDATE bets
@@ -1423,8 +1679,6 @@ def settle_bet_transaction(
 
             if cur.rowcount != 1:
 
-                # Si por cualquier motivo no se actualizó
-                # exactamente una fila, hacemos rollback.
                 conn.rollback()
 
                 return {
@@ -1435,13 +1689,6 @@ def settle_bet_transaction(
                         "ningún pago."
                     ),
                 }
-
-        # ======================================================
-        # COMMIT ATÓMICO
-        #
-        # Saldo + transacción + estado de apuesta
-        # quedan confirmados juntos.
-        # ======================================================
 
         conn.commit()
 
@@ -1623,12 +1870,6 @@ async def confirm_settlement(
 
     try:
 
-        # ------------------------------------------------------
-        # VOLVEMOS A LEER EL ESTADO REAL DE LA APUESTA.
-        #
-        # Si alguien ya la liquidó, esta función NO pagará.
-        # ------------------------------------------------------
-
         with get_db() as conn:
             with conn.cursor() as cur:
 
@@ -1679,13 +1920,6 @@ async def confirm_settlement(
 
             return
 
-        # ------------------------------------------------------
-        # VERIFICAMOS NUEVAMENTE EL RESULTADO.
-        #
-        # Si durante la espera cambió el resultado/fuente,
-        # utilizamos el resultado actual.
-        # ------------------------------------------------------
-
         verification = prepare_bet_settlement(
             bet_id
         )
@@ -1709,10 +1943,6 @@ async def confirm_settlement(
         else:
 
             final_result = RESULT_LOST
-
-        # ------------------------------------------------------
-        # TRANSACCIÓN ATÓMICA
-        # ------------------------------------------------------
 
         settlement = settle_bet_transaction(
             bet_id,
@@ -2223,11 +2453,6 @@ async def confirm_settlement_event(
         "Procesando partido..."
     )
 
-    # --------------------------------------------------------
-    # Obtenemos las apuestas pendientes.
-    # Cada una será bloqueada individualmente.
-    # --------------------------------------------------------
-
     with get_db() as conn:
         with conn.cursor() as cur:
 
@@ -2254,10 +2479,6 @@ async def confirm_settlement_event(
         )
 
         return
-
-    # --------------------------------------------------------
-    # Verificamos el resultado una vez.
-    # --------------------------------------------------------
 
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -2333,11 +2554,6 @@ async def confirm_settlement_event(
         )
 
         return
-
-    # --------------------------------------------------------
-    # Procesamos cada apuesta.
-    # Cada liquidación tiene su propio bloqueo.
-    # --------------------------------------------------------
 
     won_count = 0
     lost_count = 0
@@ -2545,7 +2761,15 @@ async def show_games(
 
         await query.edit_message_text(
             "❌ Error obteniendo partidos:\n\n"
-            f"{e}"
+            f"{e}",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="menu_football",
+                    )
+                ]
+            ]),
         )
 
         return
@@ -2553,7 +2777,15 @@ async def show_games(
     if not events:
 
         await query.edit_message_text(
-            "📭 No hay partidos disponibles."
+            "📭 No hay partidos disponibles.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data="menu_football",
+                    )
+                ]
+            ]),
         )
 
         return
@@ -2589,7 +2821,7 @@ async def show_games(
     keyboard.append([
         InlineKeyboardButton(
             "🔙 Volver",
-            callback_data="back_main",
+            callback_data="menu_football",
         )
     ])
 
@@ -2644,10 +2876,6 @@ async def show_game(
     )
 
     keyboard = []
-
-    # --------------------------------------------------------
-    # Utilizamos el primer bookmaker que tenga H2H.
-    # --------------------------------------------------------
 
     for bookmaker in bookmakers:
 
@@ -2708,7 +2936,17 @@ async def show_game(
 
         await query.edit_message_text(
             "❌ No hay cuotas H2H disponibles "
-            "para este partido."
+            "para este partido.",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "🔙 Volver",
+                        callback_data=(
+                            f"sport:{sport_key}"
+                        ),
+                    )
+                ]
+            ]),
         )
 
         return
@@ -2800,14 +3038,6 @@ async def handle_amount(
         amount * odds
     )
 
-    # --------------------------------------------------------
-    # IMPORTANTE:
-    # Ya no guardamos una "unconfirmed_bet" en Neon.
-    #
-    # La selección vive temporalmente en context.user_data.
-    # La apuesta real se crea solamente al confirmar.
-    # --------------------------------------------------------
-
     context.user_data["confirmation_bet"] = {
         "sport_key": active["sport_key"],
         "event_id": active["event_id"],
@@ -2881,10 +3111,6 @@ async def confirm_bet(
 
         with conn.cursor() as cur:
 
-            # ==================================================
-            # BLOQUEAR USUARIO
-            # ==================================================
-
             cur.execute(
                 """
                 SELECT balance
@@ -2922,10 +3148,6 @@ async def confirm_bet(
                 )
 
                 return
-
-            # ==================================================
-            # CREAR APUESTA
-            # ==================================================
 
             new_balance = money(
                 balance - stake
@@ -2974,10 +3196,6 @@ async def confirm_bet(
 
             bet_id = cur.fetchone()[0]
 
-            # ==================================================
-            # DESCONTAR SALDO
-            # ==================================================
-
             cur.execute(
                 """
                 UPDATE users
@@ -2991,10 +3209,6 @@ async def confirm_bet(
                     user_id,
                 ),
             )
-
-            # ==================================================
-            # REGISTRAR TRANSACCIÓN
-            # ==================================================
 
             cur.execute(
                 """
@@ -3035,19 +3249,15 @@ async def confirm_bet(
                 ),
             )
 
-        # ======================================================
-        # APUESTA + SALDO + TRANSACCIÓN
-        # TODO EN UNA SOLA TRANSACCIÓN.
-        # ======================================================
-
         conn.commit()
-
-    # --------------------------------------------------------
-    # Limpiar selección temporal
-    # --------------------------------------------------------
 
     context.user_data.pop(
         "confirmation_bet",
+        None,
+    )
+
+    context.user_data.pop(
+        "active_bet",
         None,
     )
 
@@ -3082,12 +3292,25 @@ async def cancel_bet(
         None,
     )
 
+    context.user_data.pop(
+        "active_bet",
+        None,
+    )
+
     await query.answer(
         "Apuesta cancelada."
     )
 
     await query.edit_message_text(
-        "❌ Apuesta cancelada."
+        "❌ Apuesta cancelada.",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🏆 Volver al inicio",
+                    callback_data="back_main",
+                )
+            ]
+        ]),
     )
 
 
@@ -3104,7 +3327,7 @@ async def button(
     data = query.data or ""
 
     # ========================================================
-    # CONFIRMAR APUESTA DEL USUARIO
+    # CONFIRMAR APUESTA
     # ========================================================
 
     if data == "confirm_bet":
@@ -3119,7 +3342,7 @@ async def button(
         return
 
     # ========================================================
-    # CANCELAR APUESTA DEL USUARIO
+    # CANCELAR APUESTA
     # ========================================================
 
     if data == "cancel_bet":
@@ -3127,6 +3350,140 @@ async def button(
         await cancel_bet(
             query,
             context,
+        )
+
+        return
+
+    # ========================================================
+    # MENÚ DEPORTES
+    # ========================================================
+
+    if data == "menu_sports":
+
+        await query.answer()
+
+        await show_sports_menu(
+            query
+        )
+
+        return
+
+    # ========================================================
+    # MENÚ FÚTBOL
+    # ========================================================
+
+    if data == "menu_football":
+
+        await query.answer()
+
+        await show_football_menu(
+            query
+        )
+
+        return
+
+    # ========================================================
+    # MIS APUESTAS
+    # ========================================================
+
+    if data == "menu_bets":
+
+        await query.answer()
+
+        await show_bets_menu(
+            query
+        )
+
+        return
+
+    if data == "bets_pending":
+
+        await query.answer()
+
+        await show_pending_bets_placeholder(
+            query
+        )
+
+        return
+
+    if data == "bets_results":
+
+        await query.answer()
+
+        await show_results_bets_placeholder(
+            query
+        )
+
+        return
+
+    # ========================================================
+    # MI SALDO
+    # ========================================================
+
+    if data == "menu_balance":
+
+        await query.answer()
+
+        await show_balance_menu(
+            query
+        )
+
+        return
+
+    if data == "balance_deposit":
+
+        await query.answer()
+
+        await show_deposit_placeholder(
+            query
+        )
+
+        return
+
+    if data == "balance_withdraw":
+
+        await query.answer()
+
+        await show_withdraw_placeholder(
+            query
+        )
+
+        return
+
+    if data == "balance_movements":
+
+        await query.answer()
+
+        await show_movements_placeholder(
+            query
+        )
+
+        return
+
+    # ========================================================
+    # HISTORIAL
+    # ========================================================
+
+    if data == "menu_history":
+
+        await query.answer()
+
+        await show_history_menu(
+            query
+        )
+
+        return
+
+    # ========================================================
+    # AYUDA
+    # ========================================================
+
+    if data == "menu_help":
+
+        await query.answer()
+
+        await show_help_menu(
+            query
         )
 
         return
@@ -3178,7 +3535,8 @@ async def button(
     ):
 
         event_id = data.split(
-            ":", 1
+            ":",
+            1,
         )[1]
 
         await confirm_settlement_event(
@@ -3209,7 +3567,8 @@ async def button(
         await query.answer()
 
         event_id = data.split(
-            ":", 1
+            ":",
+            1,
         )[1]
 
         await show_admin_event(
@@ -3224,7 +3583,8 @@ async def button(
     ):
 
         event_id = data.split(
-            ":", 1
+            ":",
+            1,
         )[1]
 
         await verify_event_for_settlement(
@@ -3235,7 +3595,7 @@ async def button(
         return
 
     # ========================================================
-    # DEPORTES
+    # COMPETICIÓN
     # ========================================================
 
     if data.startswith(
@@ -3245,7 +3605,8 @@ async def button(
         await query.answer()
 
         sport_key = data.split(
-            ":", 1
+            ":",
+            1,
         )[1]
 
         await show_games(
@@ -3306,7 +3667,15 @@ async def button(
         if not active:
 
             await query.edit_message_text(
-                "❌ Esta selección ya no está disponible."
+                "❌ Esta selección ya no está disponible.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "🔙 Volver",
+                            callback_data="menu_football",
+                        )
+                    ]
+                ]),
             )
 
             return
@@ -3318,13 +3687,14 @@ async def button(
         await query.edit_message_text(
             "💰 ¿Cuánto quieres apostar?\n\n"
             f"🎯 {active['selection']}\n"
-            f"📈 Cuota: {active['odds']}"
+            f"📈 Cuota: {active['odds']}\n\n"
+            "Escribe la cantidad de créditos:"
         )
 
         return
 
     # ========================================================
-    # VOLVER AL MENÚ
+    # VOLVER AL MENÚ PRINCIPAL
     # ========================================================
 
     if data == "back_main":
@@ -3529,6 +3899,7 @@ async def test_evaluate(
 
     sport_key = context.args[0]
     event_id = context.args[1]
+
     selection = " ".join(
         context.args[2:]
     )
