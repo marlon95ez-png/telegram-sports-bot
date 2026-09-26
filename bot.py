@@ -157,6 +157,36 @@ def init_db():
                 )
             """)
 
+            # ========================================================
+            # MIGRACIÓN DE LA TABLA TRANSACTIONS
+            # ========================================================
+
+            cur.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS user_id INTEGER
+            """)
+
+            cur.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS amount NUMERIC
+            """)
+
+            cur.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS type TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS description TEXT
+            """)
+
+            cur.execute("""
+                ALTER TABLE transactions
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMP
+                DEFAULT CURRENT_TIMESTAMP
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS pending_bets (
                     id SERIAL PRIMARY KEY,
