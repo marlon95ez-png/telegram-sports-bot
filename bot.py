@@ -1430,20 +1430,28 @@ def _settle_pending_rows(
                     cur.execute("""
                         INSERT INTO transactions (
                             user_id,
-                            amount,
                             type,
+                            amount,
+                            balance_before,
+                            balance_after,
+                            created_at,
                             description
                         )
                         VALUES (
                             %s,
                             %s,
                             %s,
+                            %s,
+                            %s,
+                            CURRENT_TIMESTAMP,
                             %s
                         )
                     """, (
                         user_id,
-                        potential_return,
                         "win",
+                        potential_return,
+                        starting_balance,
+                        new_balance,
                         (
                             f"Premio apuesta #{bet_id} "
                             f"{home_team} vs {away_team}"
